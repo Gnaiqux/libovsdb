@@ -132,6 +132,29 @@ func TestRowCache_Rows(t *testing.T) {
 	}
 }
 
+func TestRowCache_RowsByUUIDsShallow(t *testing.T) {
+	row1 := &testModel{UUID: "test1", Foo: "one"}
+	row2 := &testModel{UUID: "test2", Foo: "two"}
+	r := &RowCache{
+		cache: map[string]model.Model{
+			row1.UUID: row1,
+			row2.UUID: row2,
+		},
+	}
+
+	got := r.RowsByUUIDsShallow([]string{row2.UUID, "missing", row1.UUID, row1.UUID})
+	require.Len(t, got, 2)
+	assert.Same(t, row1, got[row1.UUID])
+	assert.Same(t, row2, got[row2.UUID])
+	delete(got, row1.UUID)
+	assert.Len(t, r.cache, 2)
+	assert.Same(t, row1, r.cache[row1.UUID])
+
+	empty := r.RowsByUUIDsShallow(nil)
+	assert.NotNil(t, empty)
+	assert.Empty(t, empty)
+}
+
 func TestRowCacheCreate(t *testing.T) {
 	var schema ovsdb.DatabaseSchema
 	db, err := model.NewClientDBModel("Open_vSwitch", map[string]model.Model{"Open_vSwitch": &testModel{}})

@@ -27,6 +27,14 @@ type API interface {
 	// ConditionFromFunc(func(l *LogicalSwitch) bool { return l.Enabled })
 	WhereCache(predicate any) ConditionalAPI
 
+	// WhereCacheByUUIDs filters cached rows using a predicate limited to the
+	// supplied UUIDs. The predicate must accept a Model implementation and
+	// return a boolean. Missing UUIDs are ignored, duplicate UUIDs are evaluated
+	// once, and an empty UUID list matches no rows.
+	//
+	// Like WhereCache, the result can be used for List or server-side operations.
+	WhereCacheByUUIDs(predicate any, uuids ...string) ConditionalAPI
+
 	// Create a ConditionalAPI from a Model's index data, where operations
 	// apply to elements that match the values provided in one or more
 	// model.Models according to the indexes. All provided Models must be
@@ -224,6 +232,11 @@ func (a api) WhereCache(predicate any) ConditionalAPI {
 	return newConditionalAPI(a.cache, a.conditionFromFunc(predicate), a.logger, a.validateModel, a.withReadLock)
 }
 
+// WhereCacheByUUIDs filters cached rows using a predicate limited to the supplied UUIDs.
+func (a api) WhereCacheByUUIDs(predicate any, uuids ...string) ConditionalAPI {
+	return newConditionalAPI(a.cache, a.conditionFromFuncByUUIDs(predicate, uuids), a.logger, a.validateModel, a.withReadLock)
+}
+
 // Conditional interface implementation
 // FromFunc returns a Condition from a function
 func (a api) conditionFromFunc(predicate any) Conditional {
@@ -233,6 +246,20 @@ func (a api) conditionFromFunc(predicate any) Conditional {
 	}
 
 	condition, err := newPredicateConditional(table, a.cache, predicate)
+	if err != nil {
+		return newErrorConditional(err)
+	}
+	return condition
+}
+
+// conditionFromFuncByUUIDs returns a UUID-limited predicate condition.
+func (a api) conditionFromFuncByUUIDs(predicate any, uuids []string) Conditional {
+	table, err := a.getTableFromFunc(predicate)
+	if err != nil {
+		return newErrorConditional(err)
+	}
+
+	condition, err := newPredicateConditionalByUUIDs(table, a.cache, predicate, uuids)
 	if err != nil {
 		return newErrorConditional(err)
 	}
@@ -627,6 +654,9 @@ func (a api) getTableFromModel(m any) (string, error) {
 	if _, ok := m.(model.Model); !ok {
 		return "", &ErrWrongType{reflect.TypeOf(m), "Type does not implement Model interface"}
 	}
+	if a.cache == nil {
+		return "", ErrNotConnected
+	}
 	table := a.cache.DatabaseModel().FindTable(reflect.TypeOf(m))
 	if table == "" {
 		return "", &ErrWrongType{reflect.TypeOf(m), "Model not found in Database Model"}
@@ -653,6 +683,9 @@ func (a api) getTableFromFunc(predicate any) (string, error) {
 	if !modelType.Implements(modelInterface) {
 		return "", &ErrWrongType{predType,
 			fmt.Sprintf("Type %s does not implement Model interface", modelType.String())}
+	}
+	if a.cache == nil {
+		return "", ErrNotConnected
 	}
 
 	table := a.cache.DatabaseModel().FindTable(modelType)

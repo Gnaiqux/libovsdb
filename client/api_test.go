@@ -28,6 +28,23 @@ var (
 
 var discardLogger = logr.Discard()
 
+type cacheOnlyClient struct {
+	Client
+	tableCache *cache.TableCache
+}
+
+func (c *cacheOnlyClient) Cache() *cache.TableCache {
+	return c.tableCache
+}
+
+func (c *cacheOnlyClient) WhereCache(predicate any) ConditionalAPI {
+	return newAPI(c.tableCache, &discardLogger, false).WhereCache(predicate)
+}
+
+func (c *cacheOnlyClient) WhereCacheByUUIDs(predicate any, uuids ...string) ConditionalAPI {
+	return newAPI(c.tableCache, &discardLogger, false).WhereCacheByUUIDs(predicate, uuids...)
+}
+
 func TestAPIListSimple(t *testing.T) {
 
 	lscacheList := []model.Model{
@@ -217,6 +234,7 @@ func TestAPIListPredicate(t *testing.T) {
 		"Logical_Switch": lscache,
 	}
 	tcache := apiTestCache(t, testData)
+	cacheClient := &cacheOnlyClient{tableCache: tcache}
 
 	test := []struct {
 		name      string
@@ -291,6 +309,97 @@ func TestAPIListPredicate(t *testing.T) {
 		err := cond.List(context.Background(), &result)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "Expected non-nil function")
+	})
+
+	t.Run("ApiListPredicate: limited by UUIDs", func(t *testing.T) {
+		candidateUUIDs := []string{aUUID0, aUUID1, aUUID3, "missing", aUUID1}
+		var predicateCalls []string
+		cond := cacheClient.WhereCacheByUUIDs(func(ls *testLogicalSwitch) bool {
+			predicateCalls = append(predicateCalls, ls.UUID)
+			return strings.HasPrefix(ls.Name, "magic")
+		}, candidateUUIDs...)
+		candidateUUIDs[0] = aUUID2
+
+		var result []*testLogicalSwitch
+		err := cond.List(context.Background(), &result)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []*testLogicalSwitch{
+			lscacheList[1].(*testLogicalSwitch),
+			lscacheList[3].(*testLogicalSwitch),
+		}, result)
+		assert.ElementsMatch(t, []string{aUUID0, aUUID1, aUUID3}, predicateCalls)
+	})
+
+	t.Run("ApiListPredicate: empty UUID list", func(t *testing.T) {
+		predicateCalls := 0
+		var result []*testLogicalSwitch
+		err := cacheClient.WhereCacheByUUIDs(func(*testLogicalSwitch) bool {
+			predicateCalls++
+			return true
+		}).List(context.Background(), &result)
+		require.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Empty(t, result)
+		assert.Zero(t, predicateCalls)
+	})
+
+	t.Run("ApiListPredicate: UUID-limited results are cloned", func(t *testing.T) {
+		var result []*testLogicalSwitch
+		err := cacheClient.WhereCacheByUUIDs(func(*testLogicalSwitch) bool {
+			return true
+		}, aUUID1).List(context.Background(), &result)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		result[0].ExternalIDs["mutated"] = "true"
+
+		var freshResult []*testLogicalSwitch
+		err = cacheClient.WhereCacheByUUIDs(func(*testLogicalSwitch) bool {
+			return true
+		}, aUUID1).List(context.Background(), &freshResult)
+		require.NoError(t, err)
+		require.Len(t, freshResult, 1)
+		assert.NotContains(t, freshResult[0].ExternalIDs, "mutated")
+	})
+
+	t.Run("ApiListPredicate: UUID-limited delete operations", func(t *testing.T) {
+		ops, err := cacheClient.WhereCacheByUUIDs(func(ls *testLogicalSwitch) bool {
+			return strings.HasPrefix(ls.Name, "magic")
+		}, aUUID0, aUUID1, aUUID3).Delete()
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []ovsdb.Operation{
+			{
+				Op:    ovsdb.OperationDelete,
+				Table: "Logical_Switch",
+				Where: []ovsdb.Condition{{Column: "_uuid", Function: ovsdb.ConditionEqual, Value: ovsdb.UUID{GoUUID: aUUID1}}},
+			},
+			{
+				Op:    ovsdb.OperationDelete,
+				Table: "Logical_Switch",
+				Where: []ovsdb.Condition{{Column: "_uuid", Function: ovsdb.ConditionEqual, Value: ovsdb.UUID{GoUUID: aUUID3}}},
+			},
+		}, ops)
+
+		emptyOps, err := cacheClient.WhereCacheByUUIDs(func(*testLogicalSwitch) bool {
+			return true
+		}).Delete()
+		require.NoError(t, err)
+		assert.Empty(t, emptyOps)
+	})
+
+	t.Run("ApiListPredicate: typed nil function with UUIDs must fail", func(t *testing.T) {
+		var predicate func(*testLogicalSwitch) bool
+		var result []*testLogicalSwitch
+		err := cacheClient.WhereCacheByUUIDs(predicate, aUUID0).List(context.Background(), &result)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "Expected non-nil function")
+	})
+
+	t.Run("ApiListPredicate: disconnected client with UUIDs must fail", func(t *testing.T) {
+		var result []*testLogicalSwitch
+		err := (&cacheOnlyClient{}).WhereCacheByUUIDs(func(*testLogicalSwitch) bool {
+			return true
+		}, aUUID0).List(context.Background(), &result)
+		require.ErrorIs(t, err, ErrNotConnected)
 	})
 }
 
@@ -1818,6 +1927,85 @@ func BenchmarkAPIList(b *testing.B) {
 				}
 				err := cond.List(context.Background(), &result)
 				assert.NoError(b, err)
+			}
+		})
+	}
+}
+
+func BenchmarkWhereCacheByUUIDs(b *testing.B) {
+	const (
+		totalRows     = 10000
+		candidateRows = 512
+	)
+
+	rows := make([]*testLogicalSwitchPort, 0, totalRows)
+	rowCache := make(map[string]model.Model, totalRows)
+	for i := 0; i < totalRows; i++ {
+		row := &testLogicalSwitchPort{
+			UUID:        uuid.New().String(),
+			Name:        fmt.Sprintf("lsp-%d", i),
+			ExternalIDs: map[string]string{"owner": fmt.Sprintf("owner-%d", i)},
+		}
+		rows = append(rows, row)
+		rowCache[row.UUID] = row
+	}
+	tcache := apiTestCache(b, cache.Data{"Logical_Switch_Port": rowCache})
+	cacheClient := &cacheOnlyClient{tableCache: tcache}
+	candidateUUIDs := make([]string, 0, candidateRows)
+	allUUIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		allUUIDs = append(allUUIDs, row.UUID)
+	}
+	for _, row := range rows[:candidateRows] {
+		candidateUUIDs = append(candidateUUIDs, row.UUID)
+	}
+	targetName := rows[candidateRows-1].Name
+	predicate := func(row *testLogicalSwitchPort) bool {
+		return row.Name == targetName
+	}
+
+	tests := []struct {
+		name      string
+		condition func() ConditionalAPI
+	}{
+		{
+			name: "global/T=10000/K=1",
+			condition: func() ConditionalAPI {
+				return cacheClient.WhereCache(predicate)
+			},
+		},
+		{
+			name: "candidate/C=512/T=10000/K=1",
+			condition: func() ConditionalAPI {
+				return cacheClient.WhereCacheByUUIDs(predicate, candidateUUIDs...)
+			},
+		},
+		{
+			name: "candidate/C=10000/T=10000/K=1",
+			condition: func() ConditionalAPI {
+				return cacheClient.WhereCacheByUUIDs(predicate, allUUIDs...)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			var result []*testLogicalSwitchPort
+			condition := tt.condition()
+			err := condition.List(context.Background(), &result)
+			require.NoError(b, err)
+			require.Len(b, result, 1)
+
+			b.ReportAllocs()
+			for b.Loop() {
+				result = nil
+				err = tt.condition().List(context.Background(), &result)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			if len(result) != 1 {
+				b.Fatalf("matches = %d, want 1", len(result))
 			}
 		})
 	}

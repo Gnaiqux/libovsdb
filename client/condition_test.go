@@ -264,6 +264,55 @@ func TestPredicateConditional(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("limited by UUIDs", func(t *testing.T) {
+		candidateUUIDs := []string{aUUID0, aUUID1, aUUID3, "missing", aUUID1}
+		var predicateCalls []string
+		predicate := func(lsp *testLogicalSwitchPort) bool {
+			predicateCalls = append(predicateCalls, lsp.UUID)
+			return lsp.Enabled != nil && !*lsp.Enabled
+		}
+		cond, err := newPredicateConditionalByUUIDs("Logical_Switch_Port", tcache, predicate, candidateUUIDs)
+		require.NoError(t, err)
+		candidateUUIDs[0] = aUUID2
+
+		matches, err := cond.Matches()
+		require.NoError(t, err)
+		require.Len(t, matches, 1)
+		assert.Equal(t, lspcacheList[1], matches[aUUID1])
+		assert.NotSame(t, tcache.Table("Logical_Switch_Port").RowsShallow()[aUUID1], matches[aUUID1])
+		assert.ElementsMatch(t, []string{aUUID0, aUUID1, aUUID3}, predicateCalls)
+
+		predicateCalls = nil
+		generated, err := cond.Generate()
+		require.NoError(t, err)
+		assert.Equal(t, [][]ovsdb.Condition{{{
+			Column:   "_uuid",
+			Function: ovsdb.ConditionEqual,
+			Value:    ovsdb.UUID{GoUUID: aUUID1},
+		}}}, generated)
+		assert.ElementsMatch(t, []string{aUUID0, aUUID1, aUUID3}, predicateCalls)
+	})
+
+	t.Run("empty UUID list", func(t *testing.T) {
+		predicateCalls := 0
+		cond, err := newPredicateConditionalByUUIDs("Logical_Switch_Port", tcache, func(*testLogicalSwitchPort) bool {
+			predicateCalls++
+			return true
+		}, nil)
+		require.NoError(t, err)
+
+		matches, err := cond.Matches()
+		require.NoError(t, err)
+		assert.NotNil(t, matches)
+		assert.Empty(t, matches)
+		assert.Zero(t, predicateCalls)
+
+		generated, err := cond.Generate()
+		require.NoError(t, err)
+		assert.Empty(t, generated)
+		assert.Zero(t, predicateCalls)
+	})
 }
 
 func TestExplicitConditionalWithNoCache(t *testing.T) {

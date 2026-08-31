@@ -2104,39 +2104,74 @@ func TestConditionalWhereListWaitsForCacheConsistency(t *testing.T) {
 	primaryDB.monitors["monitor"] = &Monitor{}
 	primaryDB.monitorsMutex.Unlock()
 
+	type embeddedClient struct {
+		Client
+	}
+	tests := []struct {
+		name      string
+		condition func() ConditionalAPI
+	}{
+		{
+			name: "Where",
+			condition: func() ConditionalAPI {
+				return ovs.Where(&Bridge{Name: bridge.Name})
+			},
+		},
+		{
+			name: "WhereCacheByUUIDs",
+			condition: func() ConditionalAPI {
+				return ovs.WhereCacheByUUIDs(func(*Bridge) bool { return true }, bridge.UUID)
+			},
+		},
+		{
+			name: "WhereCacheByUUIDs through embedded client",
+			condition: func() ConditionalAPI {
+				return (&embeddedClient{Client: ovs}).WhereCacheByUUIDs(func(*Bridge) bool { return true }, bridge.UUID)
+			},
+		},
+	}
+
 	type whereResult struct {
 		err  error
 		rows []*Bridge
 	}
-	done := make(chan whereResult, 1)
-	go func() {
-		var rows []*Bridge
-		err := ovs.Where(&Bridge{Name: "br0"}).List(context.Background(), &rows)
-		done <- whereResult{
-			err:  err,
-			rows: rows,
-		}
-	}()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primaryDB.cacheMutex.Lock()
+			primaryDB.deferUpdates = true
+			primaryDB.cacheMutex.Unlock()
 
-	// While cache is inconsistent, conditional List should block.
-	select {
-	case result := <-done:
-		t.Fatalf("Where(...).List returned before cache was marked consistent: err=%v rows=%d", result.err, len(result.rows))
-	case <-time.After(120 * time.Millisecond):
-	}
+			done := make(chan whereResult, 1)
+			go func() {
+				var rows []*Bridge
+				err := tt.condition().List(context.Background(), &rows)
+				done <- whereResult{
+					err:  err,
+					rows: rows,
+				}
+			}()
 
-	// Mark replay complete; reads should now proceed.
-	primaryDB.cacheMutex.Lock()
-	primaryDB.deferUpdates = false
-	primaryDB.cacheMutex.Unlock()
+			// While cache is inconsistent, conditional List should block.
+			select {
+			case result := <-done:
+				t.Fatalf("conditional List returned before cache was marked consistent: err=%v rows=%d", result.err, len(result.rows))
+			case <-time.After(120 * time.Millisecond):
+			}
 
-	// After consistency, the same conditional List should complete and return the row.
-	select {
-	case result := <-done:
-		require.NoError(t, result.err)
-		require.Len(t, result.rows, 1)
-		require.Equal(t, bridge.UUID, result.rows[0].UUID)
-	case <-time.After(time.Second):
-		t.Fatal("Where(...).List did not complete after cache became consistent")
+			// Mark replay complete; reads should now proceed.
+			primaryDB.cacheMutex.Lock()
+			primaryDB.deferUpdates = false
+			primaryDB.cacheMutex.Unlock()
+
+			// After consistency, the same conditional List should complete and return the row.
+			select {
+			case result := <-done:
+				require.NoError(t, result.err)
+				require.Len(t, result.rows, 1)
+				require.Equal(t, bridge.UUID, result.rows[0].UUID)
+			case <-time.After(time.Second):
+				t.Fatal("conditional List did not complete after cache became consistent")
+			}
+		})
 	}
 }

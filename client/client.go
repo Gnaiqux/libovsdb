@@ -1454,6 +1454,11 @@ func (o *ovsdbClient) WhereCache(predicate any) ConditionalAPI {
 	return o.primaryDB().api.WhereCache(predicate)
 }
 
+// WhereCacheByUUIDs implements the API interface's WhereCacheByUUIDs function
+func (o *ovsdbClient) WhereCacheByUUIDs(predicate any, uuids ...string) ConditionalAPI {
+	return o.primaryDB().api.WhereCacheByUUIDs(predicate, uuids...)
+}
+
 // Select implements the API interface's Select function
 func (o *ovsdbClient) Select(m model.Model, fields ...any) ([]ovsdb.Operation, error) {
 	return o.primaryDB().api.Select(m, fields...)
