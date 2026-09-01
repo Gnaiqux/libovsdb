@@ -1092,13 +1092,16 @@ func (suite *OVSIntegrationSuite) TestOpsWaitForReconnect() {
 	// Shutdown client
 	suite.clientWithoutInactvityCheck.Disconnect()
 
+	var err error
+	// Connected becomes false before the asynchronous disconnect handler has
+	// cleared the RPC client. Wait until teardown is complete before changing
+	// the reconnect option.
 	suite.Eventually(func() bool {
-		return !suite.clientWithoutInactvityCheck.Connected()
-	}, 5*time.Second, 1*time.Second)
-
-	err := suite.clientWithoutInactvityCheck.SetOption(
-		client.WithReconnect(2*time.Second, &backoff.ZeroBackOff{}),
-	)
+		err = suite.clientWithoutInactvityCheck.SetOption(
+			client.WithReconnect(2*time.Second, &backoff.ZeroBackOff{}),
+		)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
 	suite.Require().NoError(err)
 	var insertOp []ovsdb.Operation
 	insertOp, err = suite.clientWithoutInactvityCheck.Create(&ipfix)
