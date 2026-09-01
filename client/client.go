@@ -1251,13 +1251,14 @@ func (o *ovsdbClient) handleDisconnectNotification() {
 	<-o.rpcClient.DisconnectNotify()
 	// close the stopCh, which will stop the cache event processor
 	close(o.stopCh)
-	if o.trafficSeen != nil {
-		close(o.trafficSeen)
-	}
 	o.metrics.numDisconnects.Inc()
 	// wait for client related handlers to shutdown
 	o.handlerShutdown.Wait()
 	o.rpcMutex.Lock()
+	// trafficSeen may still have senders from transactions that hold rpcMutex
+	// for reading. stopCh also stops the inactivity handler, so trafficSeen
+	// must remain open until those transactions have completed.
+	o.trafficSeen = nil
 	if o.options.reconnect && !o.isShutdown() {
 		o.rpcClient = nil
 		o.rpcMutex.Unlock()

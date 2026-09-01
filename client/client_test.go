@@ -1135,6 +1135,41 @@ loop1:
 	}
 }
 
+func TestTrafficSeenNotClosedOnDisconnect(t *testing.T) {
+	var defSchema ovsdb.DatabaseSchema
+	err := json.Unmarshal([]byte(schema), &defSchema)
+	require.NoError(t, err)
+
+	serverDBModel, err := serverdb.FullDatabaseModel()
+	require.NoError(t, err)
+	_, sock := newOVSDBServer(t, defDB, defSchema)
+
+	endpoint := fmt.Sprintf("unix:%s", sock)
+	ovs, err := newOVSDBClient(serverDBModel,
+		WithInactivityCheck(time.Hour, time.Second, &backoff.ZeroBackOff{}),
+		WithEndpoint(endpoint))
+	require.NoError(t, err)
+	require.NoError(t, ovs.Connect(context.Background()))
+	t.Cleanup(ovs.Close)
+
+	oldTrafficSeen := ovs.trafficSeen
+	require.NotNil(t, oldTrafficSeen)
+
+	ovs.Disconnect()
+	require.Eventually(t, func() bool {
+		ovs.rpcMutex.RLock()
+		defer ovs.rpcMutex.RUnlock()
+		return ovs.connected && ovs.trafficSeen != oldTrafficSeen
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NotPanics(t, func() {
+		select {
+		case oldTrafficSeen <- struct{}{}:
+		default:
+		}
+	})
+}
+
 func TestClientReconnectLeaderOnly(t *testing.T) {
 	var connected1, connected2, disConnected1, disConnected2 int32
 	cli1, row1, endpoint1 := newClientServerPair(t, &connected1, &disConnected1, true)
