@@ -1,4 +1,6 @@
-OVS_VERSION ?= v2.16.0
+OVS_VERSION ?= v3.7.1
+
+TESTS ?=
 
 .PHONY: all
 all: lint build test integration-test coverage
@@ -13,20 +15,29 @@ prebuild: modelgen ovsdb/serverdb/_server.ovsschema example/vswitchd/ovs.ovssche
 	@echo "+ $@"
 	@go generate -v ./...
 
+.PHONY: check-generated
+check-generated: prebuild
+	@echo "+ $@"
+	@if ! git diff --quiet; then \
+		echo "Error: generated files are out of date. Please run 'make prebuild' and commit the changes."; \
+		git diff --stat; \
+		exit 1; \
+	fi
+
 .PHONY: build
-build: prebuild 
+build: prebuild
 	@echo "+ $@"
 	@go build -v ./...
 
 .PHONY: test
 test: prebuild
 	@echo "+ $@"
-	@go test -race -coverprofile=unit.cov -test.short -timeout 30s -v ./...
+	@go test -race -coverprofile=unit.cov -test.short -timeout 30s -v $(if $(TESTS),-run $(TESTS)) ./...
 
 .PHONY: integration-test
 integration-test:
 	@echo "+ $@"
-	@go test -race -coverprofile=integration.cov -coverpkg=github.com/ovn-org/libovsdb/... -timeout 60s -v ./test/ovs
+	@go test -race -coverprofile=integration.cov -coverpkg=github.com/ovn-kubernetes/libovsdb/... -timeout 60s -v $(if $(TESTS),-run $(TESTS)) ./test/ovs
 
 .PHONY: coverage
 coverage: test integration-test
@@ -34,20 +45,18 @@ coverage: test integration-test
 	@cat unit.cov integration.cov > profile.cov
 
 .PHONY: bench
-bench: install-deps prebuild
+bench: prebuild
 	@echo "+ $@"
-	@go test -run=XXX -count=3 -bench=. ./... | tee bench.out
+	@go test -run=XXX -count=3 $(if $(TESTS),-bench $(TESTS),-bench .) ./... | tee bench.out
 	@benchstat bench.out
 
 .PHONY: install-deps
 install-deps:
 	@echo "+ $@"
-	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.49.0
-	@golangci-lint --version
-	@go install golang.org/x/perf/cmd/benchstat@latest
+	@mise install
 
 .PHONY: lint
-lint: install-deps prebuild
+lint: prebuild
 	@echo "+ $@"
 	@golangci-lint run
 

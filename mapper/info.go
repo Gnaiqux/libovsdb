@@ -3,8 +3,9 @@ package mapper
 import (
 	"fmt"
 	"reflect"
+	"slices"
 
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // ErrColumnNotFound is an error that can occur when the column does not exist for a table
@@ -28,7 +29,7 @@ func NewErrColumnNotFound(column, table string) *ErrColumnNotFound {
 // Info is a struct that wraps an object with its metadata
 type Info struct {
 	// FieldName indexed by column
-	Obj      interface{}
+	Obj      any
 	Metadata Metadata
 }
 
@@ -40,7 +41,7 @@ type Metadata struct {
 }
 
 // FieldByColumn returns the field value that corresponds to a column
-func (i *Info) FieldByColumn(column string) (interface{}, error) {
+func (i *Info) FieldByColumn(column string) (any, error) {
 	fieldName, ok := i.Metadata.Fields[column]
 	if !ok {
 		return nil, NewErrColumnNotFound(column, i.Metadata.TableName)
@@ -55,7 +56,7 @@ func (i *Info) hasColumn(column string) bool {
 }
 
 // SetField sets the field in the column to the specified value
-func (i *Info) SetField(column string, value interface{}) error {
+func (i *Info) SetField(column string, value any) error {
 	fieldName, ok := i.Metadata.Fields[column]
 	if !ok {
 		return fmt.Errorf("SetField: column %s not found in orm info", column)
@@ -71,9 +72,9 @@ func (i *Info) SetField(column string, value interface{}) error {
 }
 
 // ColumnByPtr returns the column name that corresponds to the field by the field's pointer
-func (i *Info) ColumnByPtr(fieldPtr interface{}) (string, error) {
+func (i *Info) ColumnByPtr(fieldPtr any) (string, error) {
 	fieldPtrVal := reflect.ValueOf(fieldPtr)
-	if fieldPtrVal.Kind() != reflect.Ptr {
+	if fieldPtrVal.Kind() != reflect.Pointer {
 		return "", ovsdb.NewErrWrongType("ColumnByPointer", "pointer to a field in the struct", fieldPtr)
 	}
 	offset := fieldPtrVal.Pointer() - reflect.ValueOf(i.Obj).Pointer()
@@ -124,9 +125,9 @@ OUTER:
 }
 
 // NewInfo creates a MapperInfo structure around an object based on a given table schema
-func NewInfo(tableName string, table *ovsdb.TableSchema, obj interface{}) (*Info, error) {
+func NewInfo(tableName string, table *ovsdb.TableSchema, obj any) (*Info, error) {
 	objPtrVal := reflect.ValueOf(obj)
-	if objPtrVal.Type().Kind() != reflect.Ptr {
+	if objPtrVal.Type().Kind() != reflect.Pointer {
 		return nil, ovsdb.NewErrWrongType("NewMapperInfo", "pointer to a struct", obj)
 	}
 	objVal := reflect.Indirect(objPtrVal)
@@ -176,4 +177,37 @@ func NewInfo(tableName string, table *ovsdb.TableSchema, obj interface{}) (*Info
 			TableName:   tableName,
 		},
 	}, nil
+}
+
+func (i *Info) ColumnsByPtr(fields ...any) ([]string, error) {
+	var columns []string
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	// Use user-provided field pointers, with validation
+	columnSet := make(map[string]struct{}, len(fields))
+	columns = make([]string, 0, len(fields))
+
+	for _, field := range fields {
+		colName, err := i.ColumnByPtr(field)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get column name for field pointer: %w", err)
+		}
+		if _, ok := columnSet[colName]; !ok {
+			columns = append(columns, colName)
+			columnSet[colName] = struct{}{}
+		}
+	}
+	return columns, nil
+}
+
+func (i *Info) ColumnsByPtrWithUUID(fields ...any) ([]string, error) {
+	columns, err := i.ColumnsByPtr(fields...)
+	if err != nil {
+		return nil, err
+	}
+	if slices.Contains(columns, "_uuid") {
+		return columns, nil
+	}
+	return append(columns, "_uuid"), nil
 }

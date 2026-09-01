@@ -5,7 +5,7 @@ import (
 	"sort"
 	"text/template"
 
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // NewDBTemplate returns a new ClientDBModel template. It includes the following
@@ -31,8 +31,8 @@ func NewDBTemplate() *template.Template {
  import (
 	"encoding/json"
 
-	"github.com/ovn-org/libovsdb/model"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 {{- end }}
 {{ define "postDBDefinitions" }}{{ end }}
@@ -77,8 +77,8 @@ type TableInfo struct {
 //   - `DatabaseName`: (string) the database name
 //   - `PackageName`: (string) the package name
 //   - `Tables`: []Table list of Tables that form the Model
-func GetDBTemplateData(pkg string, schema ovsdb.DatabaseSchema) map[string]interface{} {
-	data := map[string]interface{}{}
+func GetDBTemplateData(pkg string, schema ovsdb.DatabaseSchema) map[string]any {
+	data := map[string]any{}
 	data["DatabaseName"] = schema.Name
 	data["PackageName"] = pkg
 	schemaBytes, _ := json.MarshalIndent(schema, "", "  ")

@@ -2,6 +2,7 @@ package modelgen
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"text/template"
@@ -9,7 +10,7 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // extendedGenTemplate include additional code generation that is optional, like
@@ -19,7 +20,7 @@ var extendedGenTemplate = `
 {{- define "equalExtraFields" }}{{ end }}
 {{- define "extendedGenImports" }}
 {{- if index . "WithExtendedGen" }}
-import "github.com/ovn-org/libovsdb/model"
+import "github.com/ovn-kubernetes/libovsdb/model"
 {{- end }}
 {{- end }}
 {{- define "extendedGen" }}
@@ -181,6 +182,8 @@ var _ model.ComparableModel = &{{ $structName }}{}
 //   - `FieldType`: prints the field type based on its column and schema
 //   - `FieldTypeWithEnums`: same as FieldType but with enum type expansion
 //   - `OvsdbTag`: prints the ovsdb tag
+//   - `ValidationTag`: generates the 'validate' struct tag based on OVSDB schema constraints
+//   - `EnumAliasSuffix`: print enum type alias suffix based on column type
 func NewTableTemplate() *template.Template {
 	return template.Must(template.New("").Funcs(
 		template.FuncMap{
@@ -189,6 +192,9 @@ func NewTableTemplate() *template.Template {
 			"FieldType":          FieldType,
 			"FieldTypeWithEnums": FieldTypeWithEnums,
 			"OvsdbTag":           Tag,
+			"ValidationTag":      ValidationTag,
+			"AtomicType":         AtomicType,
+			"EnumAliasSuffix":    enumAliasSuffix,
 		},
 	).Parse(extendedGenTemplate + `
 {{- define "header" }}
@@ -213,7 +219,7 @@ const {{ index . "StructName" }}Table = "{{ index . "TableName" }}"
 {{ if index . "Enums" }}
 type (
 {{ range index . "Enums" }}
-{{ .Alias }} = {{ .Type }}
+{{ .Alias }} = {{ AtomicType .Type }}
 {{- end }}
 )
 
@@ -221,7 +227,7 @@ var (
 {{ range  index . "Enums" }}
 {{- $e := . }}
 {{- range .Sets }}
-{{ $e.Alias }}{{ FieldName . }} {{ $e.Alias }} = {{ PrintVal . $e.Type }}
+{{ $e.Alias }}{{ EnumAliasSuffix . $e.Type }} {{ $e.Alias }} = {{ PrintVal . $e.Type }}
 {{- end }}
 {{- end }}
 )
@@ -238,10 +244,10 @@ package {{ index . "PackageName" }}
 type {{ index . "StructName" }} struct {
 {{- $tableName := index . "TableName" }}
 {{ if index . "WithEnumTypes" }}
-{{ range $field := index . "Fields" }}	{{ FieldName $field.Column }}  {{ FieldTypeWithEnums $tableName $field.Column $field.Schema }} ` + "`" + `{{ OvsdbTag $field.Column }}{{ template "extraTags" . }}` + "`" + `
+{{ range $field := index . "Fields" }}	{{ FieldName $field.Column }}  {{ FieldTypeWithEnums $tableName $field.Column $field.Schema }} ` + "`" + `{{ OvsdbTag $field.Column }}{{ ValidationTag $field.Schema }}{{ template "extraTags" . }}` + "`" + `
 {{ end }}
 {{ else }}
-{{ range  $field := index . "Fields" }}	{{ FieldName $field.Column }}  {{ FieldType $tableName $field.Column $field.Schema }} ` + "`" + `{{ OvsdbTag $field.Column }}{{ template "extraTags" . }}` + "`" + `
+{{ range  $field := index . "Fields" }}	{{ FieldName $field.Column }}  {{ FieldType $tableName $field.Column $field.Schema }} ` + "`" + `{{ OvsdbTag $field.Column }}{{ ValidationTag $field.Schema }}{{ template "extraTags" . }}` + "`" + `
 {{ end }}
 {{ end }}
 {{ template "extraFields" . }}
@@ -256,7 +262,7 @@ type {{ index . "StructName" }} struct {
 type Enum struct {
 	Type  string
 	Alias string
-	Sets  []interface{}
+	Sets  []any
 }
 
 // Field represents the field information
@@ -266,7 +272,7 @@ type Field struct {
 }
 
 // TableTemplateData represents the data used by the Table Template
-type TableTemplateData map[string]interface{}
+type TableTemplateData map[string]any
 
 // WithEnumTypes configures whether the Template should expand enum types or not
 // Enum expansion (true by default) makes the template define an type alias for each enum type
@@ -289,7 +295,7 @@ func (t TableTemplateData) WithExtendedGen(val bool) {
 //   - `TStructName`: (string) the struct name
 //   - `TFields`: []Field a list of Fields that the struct has
 func GetTableTemplateData(pkg, name string, table *ovsdb.TableSchema) TableTemplateData {
-	data := map[string]interface{}{}
+	data := map[string]any{}
 	data["TableName"] = name
 	data["PackageName"] = pkg
 	data["StructName"] = StructName(name)
@@ -413,7 +419,284 @@ func AtomicType(atype string) string {
 
 // Tag returns the Tag string of a column
 func Tag(column string) string {
-	return fmt.Sprintf("ovsdb:\"%s\"", column)
+	return fmt.Sprintf(`ovsdb:"%s"`, column)
+}
+
+// getAtomicValidations generates validation tags for a single ovsdb.BaseType.
+func getAtomicValidations(atomicSchema *ovsdb.BaseType) []string {
+	if atomicSchema == nil {
+		return nil
+	}
+
+	switch atomicSchema.Type {
+	case ovsdb.TypeInteger:
+		return getIntegerValidations(atomicSchema)
+	case ovsdb.TypeReal:
+		return getRealValidations(atomicSchema)
+	case ovsdb.TypeString:
+		return getStringValidations(atomicSchema)
+	case ovsdb.TypeUUID:
+		return getUUIDValidations(atomicSchema)
+	case ovsdb.TypeBoolean:
+		return getBooleanValidations(atomicSchema)
+	default:
+		return nil
+	}
+}
+
+// getIntegerValidations generates validation tags for integer types.
+func getIntegerValidations(atomicSchema *ovsdb.BaseType) []string {
+	var validations []string
+
+	if minVal, err := atomicSchema.MinInteger(); err == nil {
+		if minVal != math.MinInt64 {
+			validations = append(validations, fmt.Sprintf("min=%d", minVal))
+		}
+	}
+
+	if maxVal, err := atomicSchema.MaxInteger(); err == nil {
+		if maxVal != math.MaxInt64 {
+			validations = append(validations, fmt.Sprintf("max=%d", maxVal))
+		}
+	}
+
+	if len(atomicSchema.Enum) > 0 {
+		var enumValues []string
+		for _, val := range atomicSchema.Enum {
+			enumValues = append(enumValues, fmt.Sprintf("%v", val))
+		}
+		validations = append(validations, "oneof="+strings.Join(enumValues, " "))
+	}
+
+	return validations
+}
+
+// getRealValidations generates validation tags for real (float) types.
+func getRealValidations(atomicSchema *ovsdb.BaseType) []string {
+	var validations []string
+
+	if minVal, err := atomicSchema.MinReal(); err == nil {
+		if !floatEqual(minVal, math.SmallestNonzeroFloat64) {
+			validations = append(validations, fmt.Sprintf("min=%g", minVal))
+		}
+	}
+
+	if maxVal, err := atomicSchema.MaxReal(); err == nil {
+		if !floatEqual(maxVal, math.MaxFloat64) {
+			validations = append(validations, fmt.Sprintf("max=%g", maxVal))
+		}
+	}
+
+	if len(atomicSchema.Enum) > 0 {
+		// github.com/go-playground/validator/v10 don't support oneof float64
+		var eqParts []string
+		for _, val := range atomicSchema.Enum {
+			eqParts = append(eqParts, fmt.Sprintf("eq=%g", val))
+		}
+		validations = append(validations, strings.Join(eqParts, "|"))
+	}
+
+	return validations
+}
+
+// getStringValidations generates validation tags for string types.
+func getStringValidations(atomicSchema *ovsdb.BaseType) []string {
+	var validations []string
+
+	if maxVal, err := atomicSchema.MaxLength(); err == nil {
+		if maxVal != math.MaxInt32 && maxVal != math.MaxInt64 {
+			validations = append(validations, fmt.Sprintf("max=%d", maxVal))
+		}
+	}
+
+	if len(atomicSchema.Enum) > 0 {
+		var enumValues []string
+		for _, val := range atomicSchema.Enum {
+			enumValues = append(enumValues, fmt.Sprintf("'%s'", val))
+		}
+		validations = append(validations, "oneof="+strings.Join(enumValues, " "))
+	}
+
+	return validations
+}
+
+// getUUIDValidations generates validation tags for UUID types.
+func getUUIDValidations(atomicSchema *ovsdb.BaseType) []string {
+	var validations []string
+
+	// named-uuid, cannot validate in uuid
+	if len(atomicSchema.Enum) > 0 {
+		var enumValues []string
+		for _, val := range atomicSchema.Enum {
+			enumValues = append(enumValues, fmt.Sprintf("'%s'", val))
+		}
+		validations = append(validations, "oneof="+strings.Join(enumValues, " "))
+	}
+
+	return validations
+}
+
+// getBooleanValidations generates validation tags for boolean types.
+func getBooleanValidations(atomicSchema *ovsdb.BaseType) []string {
+	var validations []string
+
+	if len(atomicSchema.Enum) > 0 {
+		// github.com/go-playground/validator/v10 don't support oneof boolean
+		var includeTrue, includeFalse bool
+		for _, val := range atomicSchema.Enum {
+			if val == true {
+				includeTrue = true
+			} else {
+				includeFalse = true
+			}
+		}
+
+		// If both true and false are allowed, no validation needed
+		if includeTrue && includeFalse {
+			return validations
+		}
+
+		if includeTrue {
+			validations = append(validations, "eq=true")
+		}
+		if includeFalse {
+			validations = append(validations, "eq=false")
+		}
+	}
+
+	return validations
+}
+
+func getCollectionSizeValidations(typeObj *ovsdb.ColumnType) []string {
+	var validations []string
+	minCount := typeObj.Min()
+	maxCount := typeObj.Max()
+	if minCount > 0 {
+		validations = append(validations, fmt.Sprintf("min=%d", minCount))
+	}
+	if maxCount != ovsdb.Unlimited {
+		validations = append(validations, fmt.Sprintf("max=%d", maxCount))
+	}
+	return validations
+}
+
+func getSetValidations(schema *ovsdb.ColumnSchema) []string {
+	var validations []string
+	validations = append(validations, getCollectionSizeValidations(schema.TypeObj)...)
+	if schema.TypeObj.Key != nil {
+		elementValidations := getAtomicValidations(schema.TypeObj.Key)
+		if len(elementValidations) > 0 {
+			validations = append(validations, "dive")
+			validations = append(validations, elementValidations...)
+		}
+	}
+	return validations
+}
+
+func getMapValidations(schema *ovsdb.ColumnSchema) []string {
+	var validations []string
+	validations = append(validations, getCollectionSizeValidations(schema.TypeObj)...)
+
+	// Check if we have key or value validations
+	var keyAtomValidations []string
+	var valueAtomValidations []string
+
+	if schema.TypeObj.Key != nil {
+		keyAtomValidations = getAtomicValidations(schema.TypeObj.Key)
+	}
+	if schema.TypeObj.Value != nil {
+		valueAtomValidations = getAtomicValidations(schema.TypeObj.Value)
+	}
+
+	hasKeyValidations := len(keyAtomValidations) > 0
+	hasValueValidations := len(valueAtomValidations) > 0
+
+	if !hasKeyValidations && !hasValueValidations {
+		return validations
+	}
+	// Only add dive validations if we have key or value validations
+	var diveValidations []string
+	diveValidations = append(diveValidations, "dive")
+
+	// Add key validations if they exist
+	if hasKeyValidations {
+		diveValidations = append(diveValidations, "keys")
+		diveValidations = append(diveValidations, keyAtomValidations...)
+	}
+	if hasKeyValidations && hasValueValidations {
+		diveValidations = append(diveValidations, "endkeys")
+	}
+	// Add value validations if they exist
+	if hasValueValidations {
+		diveValidations = append(diveValidations, valueAtomValidations...)
+	}
+
+	validations = append(validations, diveValidations...)
+
+	return validations
+}
+
+func getAtomicTypeValidations(schema *ovsdb.ColumnSchema) []string {
+	var baseTypeForAtomic *ovsdb.BaseType
+	if schema.TypeObj != nil && schema.TypeObj.Key != nil {
+		baseTypeForAtomic = schema.TypeObj.Key
+	} else if schema.TypeObj == nil {
+		baseTypeForAtomic = &ovsdb.BaseType{Type: schema.Type}
+	}
+
+	if baseTypeForAtomic != nil {
+		return getAtomicValidations(baseTypeForAtomic)
+	}
+	return nil
+}
+
+// ValidationTag generates the 'validate' struct tag based on OVSDB schema constraints.
+func ValidationTag(schema *ovsdb.ColumnSchema) string {
+	var finalValidations []string
+
+	if schema.TypeObj == nil {
+		finalValidations = getAtomicTypeValidations(schema)
+	} else {
+		switch schema.Type {
+		case ovsdb.TypeSet:
+			isPointerForOptionalSet := schema.TypeObj.Min() == 0 && schema.TypeObj.Max() == 1
+			isScalarFromSet := schema.TypeObj.Min() == 1 && schema.TypeObj.Max() == 1
+			switch {
+			case isPointerForOptionalSet:
+				if schema.TypeObj.Key != nil {
+					elementValidations := getAtomicValidations(schema.TypeObj.Key)
+					if len(elementValidations) > 0 {
+						finalValidations = append(finalValidations, "omitempty")
+						finalValidations = append(finalValidations, elementValidations...)
+					}
+				}
+			case isScalarFromSet:
+				if schema.TypeObj.Key != nil {
+					finalValidations = append(finalValidations, getAtomicValidations(schema.TypeObj.Key)...)
+				}
+			default:
+				finalValidations = getSetValidations(schema)
+			}
+		case ovsdb.TypeMap:
+			finalValidations = getMapValidations(schema)
+		default:
+			finalValidations = getAtomicTypeValidations(schema)
+		}
+	}
+
+	// Filter out any genuinely empty strings that might have been added.
+	var nonEmptyValidations []string
+	for _, v := range finalValidations {
+		if v != "" {
+			nonEmptyValidations = append(nonEmptyValidations, v)
+		}
+	}
+
+	if len(nonEmptyValidations) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf(` validate:"%s"`, strings.Join(nonEmptyValidations, ","))
 }
 
 // FileName returns the filename of a table
@@ -485,16 +768,36 @@ func expandInitilaisms(s string) string {
 	return s
 }
 
-func printVal(v interface{}, t string) string {
+func printVal(v any, t string) string {
 	switch t {
-	case "int":
+	case "integer":
 		return fmt.Sprintf(`%d`, v)
-	case "float64":
-		return fmt.Sprintf(`%f`, v)
-	case "bool":
+	case "real":
+		return fmt.Sprintf(`%g`, v)
+	case "boolean":
 		return fmt.Sprintf(`%t`, v)
-	case "string":
+	case "string", "uuid":
 		return fmt.Sprintf(`"%s"`, v)
 	}
 	return ""
+}
+
+func enumAliasSuffix(v any, t string) string {
+	switch t {
+	case "integer":
+		return fmt.Sprintf(`%d`, v)
+	case "real":
+		return strings.Replace(fmt.Sprintf(`%g`, v), ".", "_", 1)
+	case "boolean":
+		return fmt.Sprintf(`%t`, v)
+	case "string":
+		return FieldName(fmt.Sprintf(`%s`, v))
+	case "uuid":
+		return strings.ReplaceAll(fmt.Sprintf(`%s`, v), "-", "_")
+	}
+	return ""
+}
+
+func floatEqual(a, b float64) bool {
+	return math.Abs(a-b) < 1e-9
 }

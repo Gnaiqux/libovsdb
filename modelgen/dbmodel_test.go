@@ -5,7 +5,7 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,7 +39,7 @@ func TestDbModelTemplate(t *testing.T) {
 	}`)
 	test := []struct {
 		name      string
-		extend    func(tmpl *template.Template, data map[string]interface{})
+		extend    func(tmpl *template.Template, data map[string]any)
 		expected  string
 		err       bool
 		formatErr bool
@@ -54,8 +54,8 @@ package test
 import (
 	"encoding/json"
 
-	"github.com/ovn-org/libovsdb/model"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // FullDatabaseModel returns the DatabaseModel object to be used in libovsdb
@@ -131,13 +131,13 @@ func Schema() ovsdb.DatabaseSchema {
 			tmpl := NewDBTemplate()
 			data := GetDBTemplateData("test", schema)
 			if tt.err {
-				assert.NotNil(t, err)
+				require.Error(t, err)
 			} else {
 				g, err := NewGenerator()
 				require.NoError(t, err)
 				b, err := g.Format(tmpl, data)
 				if tt.formatErr {
-					assert.NotNil(t, err)
+					require.Error(t, err)
 				} else {
 					require.NoError(t, err)
 					assert.Equal(t, tt.expected, string(b))

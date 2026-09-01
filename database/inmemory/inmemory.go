@@ -2,18 +2,15 @@ package inmemory
 
 import (
 	"fmt"
-	"log"
-	"os"
 	"sync"
 
 	"github.com/go-logr/logr"
-	"github.com/go-logr/stdr"
 	"github.com/google/uuid"
-	"github.com/ovn-org/libovsdb/cache"
-	dbase "github.com/ovn-org/libovsdb/database"
-	"github.com/ovn-org/libovsdb/database/transaction"
-	"github.com/ovn-org/libovsdb/model"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/cache"
+	dbase "github.com/ovn-kubernetes/libovsdb/database"
+	"github.com/ovn-kubernetes/libovsdb/database/transaction"
+	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 type inMemoryDatabase struct {
@@ -24,14 +21,13 @@ type inMemoryDatabase struct {
 	mutex      sync.RWMutex
 }
 
-func NewDatabase(models map[string]model.ClientDBModel) dbase.Database {
-	logger := stdr.NewWithOptions(log.New(os.Stderr, "", log.LstdFlags), stdr.Options{LogCaller: stdr.All}).WithName("database")
+func NewDatabase(models map[string]model.ClientDBModel, logger *logr.Logger) dbase.Database {
 	return &inMemoryDatabase{
 		databases:  make(map[string]*cache.TableCache),
 		models:     models,
 		references: make(map[string]dbase.References),
 		mutex:      sync.RWMutex{},
-		logger:     &logger,
+		logger:     logger,
 	}
 }
 
@@ -74,7 +70,7 @@ func (db *inMemoryDatabase) Exists(name string) bool {
 	return ok
 }
 
-func (db *inMemoryDatabase) Commit(database string, id uuid.UUID, update dbase.Update) error {
+func (db *inMemoryDatabase) Commit(database string, _ uuid.UUID, update dbase.Update) error {
 	if !db.Exists(database) {
 		return fmt.Errorf("db does not exist")
 	}

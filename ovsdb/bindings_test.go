@@ -11,14 +11,22 @@ import (
 )
 
 var (
-	aString  = "foo"
-	aEnum    = "enum1"
-	aEnumSet = []string{"enum1", "enum2", "enum3"}
-	aSet     = []string{"a", "set", "of", "strings"}
-	aUUID0   = "2f77b348-9768-4866-b761-89d5177ecda0"
-	aUUID1   = "2f77b348-9768-4866-b761-89d5177ecda1"
-	aUUID2   = "2f77b348-9768-4866-b761-89d5177ecda2"
-	aUUID3   = "2f77b348-9768-4866-b761-89d5177ecda3"
+	aUUID0       = "2f77b348-9768-4866-b761-89d5177ecda0"
+	aUUID1       = "2f77b348-9768-4866-b761-89d5177ecda1"
+	aUUID2       = "2f77b348-9768-4866-b761-89d5177ecda2"
+	aUUID3       = "2f77b348-9768-4866-b761-89d5177ecda3"
+	aString      = "foo"
+	aEnum        = "enum1"
+	anIntEnum    = 1
+	aRealEnum    = 1.0
+	aBoolEnum    = true
+	aEnumSet     = []string{"enum1", "enum2", "enum3"}
+	anIntEnumSet = []int{1, 2, 3}
+	aRealEnumSet = []float64{1.0, 2.0, 3.0}
+	aBoolEnumSet = []bool{true, false}
+	aUUIDEnumSet = []UUID{{GoUUID: aUUID0}, {GoUUID: aUUID1}, {GoUUID: aUUID2}}
+
+	aSet = []string{"a", "set", "of", "strings"}
 
 	aSingleUUIDSet, _ = NewOvsSet(UUID{GoUUID: aUUID0})
 
@@ -80,6 +88,10 @@ func TestOvsToNativeAndNativeToOvs(t *testing.T) {
 
 	es, _ := NewOvsSet(aEmptySet)
 	ens, _ := NewOvsSet(aEnumSet)
+	ies, _ := NewOvsSet(anIntEnumSet)
+	bes, _ := NewOvsSet(aBoolEnumSet)
+	ues, _ := NewOvsSet(aUUIDEnumSet)
+	res, _ := NewOvsSet(aRealEnumSet)
 
 	m, _ := NewOvsMap(aMap)
 
@@ -94,9 +106,9 @@ func TestOvsToNativeAndNativeToOvs(t *testing.T) {
 	tests := []struct {
 		name   string
 		schema []byte
-		input  interface{}
-		native interface{}
-		ovs    interface{}
+		input  any
+		native any
+		ovs    any
 	}{
 		{
 			name:   "String",
@@ -335,6 +347,180 @@ func TestOvsToNativeAndNativeToOvs(t *testing.T) {
 			ovs:    ens,
 		},
 		{
+			name: "Enum (integer)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							1,
+							2,
+							3
+						]
+					],
+					"type": "integer"
+				}
+			}
+		}`),
+			input:  anIntEnum,
+			native: anIntEnum,
+			ovs:    anIntEnum,
+		},
+		{
+			name: "Enum Set (integer)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							1,
+							2,
+							3
+						]
+					],
+					"type": "integer"
+				},
+				"max": "unlimited",
+				"min": 0
+			}
+		}`),
+			input:  ies,
+			native: anIntEnumSet,
+			ovs:    ies,
+		},
+		{
+			name: "Enum (real)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							1.0,
+							2.0,
+							3.0
+						]
+					],
+					"type": "real"
+				}
+			}
+		}`),
+			input:  aRealEnum,
+			native: aRealEnum,
+			ovs:    aRealEnum,
+		},
+		{
+			name: "Enum Set (real)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							1.0,
+							2.0,
+							3.0
+						]
+					],
+					"type": "real"
+				},
+				"max": "unlimited",
+				"min": 0
+			}
+		}`),
+			input:  res,
+			native: aRealEnumSet,
+			ovs:    res,
+		},
+		{
+			name: "Enum (bool)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							true,
+							false
+						]
+					],
+					"type": "boolean"
+				}
+			}
+		}`),
+			input:  aBoolEnum,
+			native: aBoolEnum,
+			ovs:    aBoolEnum,
+		},
+		{
+			name: "Enum Set (bool)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							true,
+							false
+						]
+					],
+					"type": "boolean"
+				},
+				"min": 0,
+				"max": "unlimited"
+			}
+		}`),
+			input:  bes,
+			native: aBoolEnumSet,
+			ovs:    bes,
+		},
+		{
+			name: "Enum (uuid)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							["uuid", "2f77b348-9768-4866-b761-89d5177ecda0"],
+							["uuid", "2f77b348-9768-4866-b761-89d5177ecda1"],
+							["uuid", "2f77b348-9768-4866-b761-89d5177ecda2"]
+						]
+					],
+					"type": "uuid"
+				}
+			}
+		}`),
+			input:  UUID{GoUUID: aUUID0},
+			native: aUUID0,
+			ovs:    UUID{GoUUID: aUUID0},
+		},
+		{
+			name: "Enum Set (uuid)",
+			schema: []byte(`{
+			"type": {
+				"key": {
+					"enum": [
+						"set",
+						[
+							["uuid", "2f77b348-9768-4866-b761-89d5177ecda0"],
+							["uuid", "2f77b348-9768-4866-b761-89d5177ecda1"],
+							["uuid", "2f77b348-9768-4866-b761-89d5177ecda2"]
+						]
+					],
+					"type": "uuid"
+				},
+				"min": 0,
+				"max": "unlimited"
+			}
+		}`),
+			input:  ues,
+			native: []string{aUUID0, aUUID1, aUUID2},
+			ovs:    ues,
+		},
+		{
 			name: "Map (string->string)",
 			schema: []byte(`{
 			"type": {
@@ -466,7 +652,7 @@ func TestOvsToNativeErr(t *testing.T) {
 	tests := []struct {
 		name   string
 		schema []byte
-		input  interface{}
+		input  any
 	}{
 		{
 			name:   "Wrong Atomic Type",
@@ -519,7 +705,7 @@ func TestOvsToNativeErr(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(fmt.Sprintf(tt.name), func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			var column ColumnSchema
 			err := json.Unmarshal(tt.schema, &column)
 			require.NoError(t, err)
@@ -536,7 +722,7 @@ func TestNativeToOvsErr(t *testing.T) {
 	tests := []struct {
 		name   string
 		schema []byte
-		input  interface{}
+		input  any
 	}{
 		{
 			name:   "Wrong Atomic Type",
@@ -596,7 +782,7 @@ func TestNativeToOvsErr(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(fmt.Sprintf(tt.name), func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			var column ColumnSchema
 			if err := json.Unmarshal(tt.schema, &column); err != nil {
 				t.Fatal(err)
@@ -614,7 +800,7 @@ func TestIsDefault(t *testing.T) {
 	type Test struct {
 		name     string
 		column   []byte
-		elem     interface{}
+		elem     any
 		expected bool
 	}
 	tests := []Test{
@@ -815,7 +1001,7 @@ func TestMutationValidation(t *testing.T) {
 		name     string
 		column   []byte
 		mutators []Mutator
-		value    interface{}
+		value    any
 		valid    bool
 	}
 	tests := []Test{
@@ -1032,9 +1218,9 @@ func TestMutationValidation(t *testing.T) {
 			for _, m := range test.mutators {
 				result := ValidateMutation(&column, m, test.value)
 				if test.valid {
-					assert.Nil(t, result)
+					require.NoError(t, result)
 				} else {
-					assert.NotNil(t, result)
+					require.Error(t, result)
 				}
 			}
 		})
@@ -1046,7 +1232,7 @@ func TestConditionValidation(t *testing.T) {
 		name      string
 		column    []byte
 		functions []ConditionFunction
-		value     interface{}
+		value     any
 		valid     bool
 	}
 	tests := []Test{
@@ -1148,19 +1334,27 @@ func TestConditionValidation(t *testing.T) {
 			value:     map[string]int{"foo": 42},
 			valid:     false,
 		},
+		{
+			name: "enum",
+			column: []byte(`{"type": {"key": {"type": "string",
+                                            "enum": ["set", ["from-lport", "to-lport"]]}}}`),
+			functions: []ConditionFunction{ConditionEqual, ConditionIncludes, ConditionNotEqual, ConditionExcludes},
+			value:     "from-lport",
+			valid:     true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("ConditionValidation: %s", test.name), func(t *testing.T) {
 			var column ColumnSchema
 			err := json.Unmarshal(test.column, &column)
-			assert.Nil(t, err)
+			require.NoError(t, err)
 
 			for _, f := range test.functions {
 				result := ValidateCondition(&column, f, test.value)
 				if test.valid {
-					assert.Nil(t, result)
+					require.NoError(t, result)
 				} else {
-					assert.NotNil(t, result)
+					require.Error(t, result)
 				}
 			}
 		})

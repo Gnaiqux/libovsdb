@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/ovn-org/libovsdb/mapper"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/mapper"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // ColumnKey addresses a column and optionally a key within a column
 type ColumnKey struct {
 	Column string
-	Key    interface{}
+	Key    any
 }
 
 // ClientIndex defines a client index by a set of columns
@@ -34,6 +34,13 @@ func (db ClientDBModel) newModel(table string) (Model, error) {
 	}
 	model := reflect.New(mtype.Elem())
 	return model.Interface().(Model), nil
+}
+
+// Types returns the ClientDBModel Types
+// The ClientDBModel types is a map of reflect.Types indexed by string
+// The reflect.Type is a pointer to a struct that contains 'ovs' tags.
+func (db ClientDBModel) Types() map[string]reflect.Type {
+	return db.types
 }
 
 // Name returns the database name
@@ -129,7 +136,7 @@ func NewClientDBModel(name string, models map[string]Model) (ClientDBModel, erro
 	types := make(map[string]reflect.Type, len(models))
 	for table, model := range models {
 		modelType := reflect.TypeOf(model)
-		if modelType.Kind() != reflect.Ptr || modelType.Elem().Kind() != reflect.Struct {
+		if modelType.Kind() != reflect.Pointer || modelType.Elem().Kind() != reflect.Struct {
 			return ClientDBModel{}, fmt.Errorf("model is expected to be a pointer to struct")
 		}
 		hasUUID := false

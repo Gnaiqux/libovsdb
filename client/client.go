@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/url"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,12 +17,11 @@ import (
 	"github.com/cenkalti/rpc2"
 	"github.com/cenkalti/rpc2/jsonrpc"
 	"github.com/go-logr/logr"
-	"github.com/go-logr/stdr"
-	"github.com/ovn-org/libovsdb/cache"
-	"github.com/ovn-org/libovsdb/mapper"
-	"github.com/ovn-org/libovsdb/model"
-	"github.com/ovn-org/libovsdb/ovsdb"
-	"github.com/ovn-org/libovsdb/ovsdb/serverdb"
+	"github.com/ovn-kubernetes/libovsdb/cache"
+	"github.com/ovn-kubernetes/libovsdb/mapper"
+	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb/serverdb"
 )
 
 // Constants defined for libovsdb
@@ -68,6 +65,13 @@ type Client interface {
 	NewMonitor(...MonitorOption) *Monitor
 	CurrentEndpoint() string
 	API
+	// GetSelectResultsByIndex parses the result of the select operation indicated by
+	// the 0-based index from the transaction results of the provided operations.
+	GetSelectResultsByIndex(ops []ovsdb.Operation, results []ovsdb.OperationResult, target interface{}, index int) error
+
+	// GetSelectResults parses the result of the first select operation from the
+	// transaction results of the provided operations.
+	GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target interface{}) error
 }
 
 type bufferedUpdate struct {
@@ -167,12 +171,9 @@ func newOVSDBClient(clientDBModel model.ClientDBModel, opts ...Option) (*ovsdbCl
 	}
 
 	if ovs.options.logger == nil {
-		// create a new logger to log to stdout
-		l := stdr.NewWithOptions(log.New(os.Stderr, "", log.LstdFlags), stdr.Options{LogCaller: stdr.All}).WithName("libovsdb").WithValues(
-			"database", ovs.primaryDBName,
-		)
-		stdr.SetVerbosity(5)
-		ovs.logger = &l
+		// If no logger is provided, use a Discard logger
+		logger := logr.Discard()
+		ovs.logger = &logger
 	} else {
 		// add the "database" value to the structured logger
 		// to make it easier to tell between different DBs (e.g. ovn nbdb vs. sbdb)
@@ -258,7 +259,6 @@ func (o *ovsdbClient) connect(ctx context.Context, reconnect bool) error {
 			o.resetRPCClient()
 			connectErrors = append(connectErrors,
 				fmt.Errorf("failed to connect to %s: %w", endpoint.address, err))
-			continue
 		} else {
 			o.logger.V(3).Info("successfully connected", "endpoint", endpoint.address, "sid", sid)
 			endpoint.serverID = sid
@@ -285,11 +285,11 @@ func (o *ovsdbClient) connect(ctx context.Context, reconnect bool) error {
 		o.logger.V(3).Info("reconnected - restarting monitors")
 		for dbName, db := range o.databases {
 			db.monitorsMutex.Lock()
-			defer db.monitorsMutex.Unlock()
 
 			// Purge entire cache if no monitors exist to update dynamically
 			if len(db.monitors) == 0 {
 				db.cache.Purge(db.model)
+				db.monitorsMutex.Unlock()
 				continue
 			}
 
@@ -299,9 +299,11 @@ func (o *ovsdbClient) connect(ctx context.Context, reconnect bool) error {
 				err := o.monitor(ctx, MonitorCookie{DatabaseName: dbName, ID: id}, true, request)
 				if err != nil {
 					o.resetRPCClient()
+					db.monitorsMutex.Unlock()
 					return err
 				}
 			}
+			db.monitorsMutex.Unlock()
 		}
 	}
 
@@ -399,7 +401,12 @@ func (o *ovsdbClient) tryEndpoint(ctx context.Context, u *url.URL) (string, erro
 				db.cacheMutex.Unlock()
 				return "", err
 			}
-			db.api = newAPI(db.cache, o.logger)
+			dbNameForWait := dbName
+			dbForWait := db
+			db.api = newAPI(db.cache, o.logger, o.options.validateModel, func(ctx context.Context) func() {
+				waitForCacheConsistent(ctx, dbForWait, o.logger, dbNameForWait)
+				return dbForWait.cacheMutex.RUnlock
+			})
 		}
 		db.cacheMutex.Unlock()
 	}
@@ -429,16 +436,16 @@ func (o *ovsdbClient) createRPC2Client(conn net.Conn) {
 	}
 	o.rpcClient = rpc2.NewClientWithCodec(jsonrpc.NewJSONCodec(conn))
 	o.rpcClient.SetBlocking(true)
-	o.rpcClient.Handle("echo", func(_ *rpc2.Client, args []interface{}, reply *[]interface{}) error {
+	o.rpcClient.Handle("echo", func(_ *rpc2.Client, args []any, reply *[]any) error {
 		return o.echo(args, reply)
 	})
-	o.rpcClient.Handle("update", func(_ *rpc2.Client, args []json.RawMessage, reply *[]interface{}) error {
+	o.rpcClient.Handle("update", func(_ *rpc2.Client, args []json.RawMessage, reply *[]any) error {
 		return o.update(args, reply)
 	})
-	o.rpcClient.Handle("update2", func(_ *rpc2.Client, args []json.RawMessage, reply *[]interface{}) error {
+	o.rpcClient.Handle("update2", func(_ *rpc2.Client, args []json.RawMessage, reply *[]any) error {
 		return o.update2(args, reply)
 	})
-	o.rpcClient.Handle("update3", func(_ *rpc2.Client, args []json.RawMessage, reply *[]interface{}) error {
+	o.rpcClient.Handle("update3", func(_ *rpc2.Client, args []json.RawMessage, reply *[]any) error {
 		return o.update3(args, reply)
 	})
 	go o.rpcClient.Run()
@@ -597,8 +604,15 @@ func (o *ovsdbClient) DisconnectNotify() chan struct{} {
 	return o.disconnect
 }
 
+// isShutdown returns true if the client is in the process of shutting down
+func (o *ovsdbClient) isShutdown() bool {
+	o.shutdownMutex.Lock()
+	defer o.shutdownMutex.Unlock()
+	return o.shutdown
+}
+
 // RFC 7047 : Section 4.1.6 : Echo
-func (o *ovsdbClient) echo(args []interface{}, reply *[]interface{}) error {
+func (o *ovsdbClient) echo(args []any, reply *[]any) error {
 	*reply = args
 	return nil
 }
@@ -607,9 +621,9 @@ func (o *ovsdbClient) echo(args []interface{}, reply *[]interface{}) error {
 // params is an array of length 2: [json-value, table-updates]
 // - json-value: the arbitrary json-value passed when creating the Monitor, i.e. the "cookie"
 // - table-updates: map of table name to table-update. Table-update is a map of uuid to (old, new) row paris
-func (o *ovsdbClient) update(params []json.RawMessage, reply *[]interface{}) error {
+func (o *ovsdbClient) update(params []json.RawMessage, reply *[]any) error {
 	cookie := MonitorCookie{}
-	*reply = []interface{}{}
+	*reply = []any{}
 	if len(params) > 2 {
 		return fmt.Errorf("update requires exactly 2 args")
 	}
@@ -652,9 +666,9 @@ func (o *ovsdbClient) update(params []json.RawMessage, reply *[]interface{}) err
 }
 
 // update2 handling from ovsdb-server.7
-func (o *ovsdbClient) update2(params []json.RawMessage, reply *[]interface{}) error {
+func (o *ovsdbClient) update2(params []json.RawMessage, reply *[]any) error {
 	cookie := MonitorCookie{}
-	*reply = []interface{}{}
+	*reply = []any{}
 	if len(params) > 2 {
 		return fmt.Errorf("update2 requires exactly 2 args")
 	}
@@ -693,9 +707,9 @@ func (o *ovsdbClient) update2(params []json.RawMessage, reply *[]interface{}) er
 }
 
 // update3 handling from ovsdb-server.7
-func (o *ovsdbClient) update3(params []json.RawMessage, reply *[]interface{}) error {
+func (o *ovsdbClient) update3(params []json.RawMessage, reply *[]any) error {
 	cookie := MonitorCookie{}
-	*reply = []interface{}{}
+	*reply = []any{}
 	if len(params) > 3 {
 		return fmt.Errorf("update requires exactly 3 args")
 	}
@@ -829,7 +843,7 @@ func (o *ovsdbClient) transact(ctx context.Context, dbName string, skipChWrite b
 	}
 
 	args := ovsdb.NewTransactArgs(dbName, operation...)
-	if o.rpcClient == nil {
+	if o.rpcClient == nil || o.isShutdown() {
 		return nil, ErrNotConnected
 	}
 	dbgLogger := logger.WithValues("database", dbName).V(4)
@@ -845,7 +859,11 @@ func (o *ovsdbClient) transact(ctx context.Context, dbName string, skipChWrite b
 	}
 
 	if !skipChWrite && o.trafficSeen != nil {
-		o.trafficSeen <- struct{}{}
+		select {
+		case o.trafficSeen <- struct{}{}:
+		default:
+			// If the channel is full, drop the message
+		}
 	}
 	return reply, nil
 }
@@ -866,7 +884,7 @@ func (o *ovsdbClient) MonitorCancel(ctx context.Context, cookie MonitorCookie) e
 	args := ovsdb.NewMonitorCancelArgs(cookie)
 	o.rpcMutex.Lock()
 	defer o.rpcMutex.Unlock()
-	if o.rpcClient == nil {
+	if o.rpcClient == nil || o.isShutdown() {
 		return ErrNotConnected
 	}
 	err := o.rpcClient.CallWithContext(ctx, "monitor_cancel", args, &reply)
@@ -921,7 +939,7 @@ func (o *ovsdbClient) monitor(ctx context.Context, cookie MonitorCookie, reconne
 		o.rpcMutex.RLock()
 		defer o.rpcMutex.RUnlock()
 	}
-	if o.rpcClient == nil {
+	if o.rpcClient == nil || o.isShutdown() {
 		return ErrNotConnected
 	}
 	if len(monitor.Errors) != 0 {
@@ -929,10 +947,10 @@ func (o *ovsdbClient) monitor(ctx context.Context, cookie MonitorCookie, reconne
 		for _, err := range monitor.Errors {
 			errString = append(errString, err.Error())
 		}
-		return fmt.Errorf(strings.Join(errString, ". "))
+		return errors.New(strings.Join(errString, ". "))
 	}
 	if len(monitor.Tables) == 0 {
-		return fmt.Errorf("at least one table should be monitored")
+		return errors.New("at least one table should be monitored")
 	}
 	dbName := cookie.DatabaseName
 	db := o.databases[dbName]
@@ -960,7 +978,7 @@ func (o *ovsdbClient) monitor(ctx context.Context, cookie MonitorCookie, reconne
 	}
 	db.modelMutex.RUnlock()
 
-	var args []interface{}
+	var args []any
 	if monitor.Method == ovsdb.ConditionalMonitorSinceRPC {
 		// If we are reconnecting a CondSince monitor that is the only
 		// monitor, then we can use its LastTransactionID since it is
@@ -975,7 +993,7 @@ func (o *ovsdbClient) monitor(ctx context.Context, cookie MonitorCookie, reconne
 		args = ovsdb.NewMonitorArgs(dbName, cookie, requests)
 	}
 	var err error
-	var tableUpdates interface{}
+	var tableUpdates any
 
 	var lastTransactionFound bool
 	switch monitor.Method {
@@ -1074,10 +1092,10 @@ func (o *ovsdbClient) monitor(ctx context.Context, cookie MonitorCookie, reconne
 // Echo tests the liveness of the OVSDB connetion
 func (o *ovsdbClient) Echo(ctx context.Context) error {
 	args := ovsdb.NewEchoArgs()
-	var reply []interface{}
+	var reply []any
 	o.rpcMutex.RLock()
 	defer o.rpcMutex.RUnlock()
-	if o.rpcClient == nil {
+	if o.rpcClient == nil || o.isShutdown() {
 		return ErrNotConnected
 	}
 	err := o.rpcClient.CallWithContext(ctx, "echo", args, &reply)
@@ -1085,6 +1103,7 @@ func (o *ovsdbClient) Echo(ctx context.Context) error {
 		if err == rpc2.ErrShutdown {
 			return ErrNotConnected
 		}
+		return err
 	}
 	if !reflect.DeepEqual(args, reply) {
 		return fmt.Errorf("incorrect server response: %v, %v", args, reply)
@@ -1097,9 +1116,9 @@ func (o *ovsdbClient) Echo(ctx context.Context) error {
 func (o *ovsdbClient) watchForLeaderChange() error {
 	updates := make(chan model.Model)
 	o.databases[serverDB].cache.AddEventHandler(&cache.EventHandlerFuncs{
-		UpdateFunc: func(table string, _, new model.Model) {
+		UpdateFunc: func(table string, _, n model.Model) {
 			if table == "Database" {
-				updates <- new
+				updates <- n
 			}
 		},
 	})
@@ -1197,72 +1216,34 @@ func (o *ovsdbClient) handleClientErrors(stopCh <-chan struct{}) {
 	}
 }
 
-func (o *ovsdbClient) sendEcho(args []interface{}, reply *[]interface{}) *rpc2.Call {
-	o.rpcMutex.RLock()
-	defer o.rpcMutex.RUnlock()
-	if o.rpcClient == nil {
-		return nil
-	}
-	return o.rpcClient.Go("echo", args, reply, make(chan *rpc2.Call, 1))
-}
-
 func (o *ovsdbClient) handleInactivityProbes() {
 	defer o.handlerShutdown.Done()
-	echoReplied := make(chan string)
-	var lastEcho string
 	stopCh := o.stopCh
 	trafficSeen := o.trafficSeen
+	timer := time.NewTimer(o.options.inactivityTimeout)
 	for {
 		select {
 		case <-stopCh:
+			timer.Stop()
 			return
 		case <-trafficSeen:
-			// We got some traffic from the server, restart our timer
-		case ts := <-echoReplied:
-			// Got a response from the server, check it against lastEcho; if same clear lastEcho; if not same Disconnect()
-			if ts != lastEcho {
-				o.Disconnect()
-				return
+			// We got some traffic from the server
+			// Timer must be stopped and drained of stale values before resetting it
+			// See: https://pkg.go.dev/time#NewTimer
+			if !timer.Stop() {
+				<-timer.C
 			}
-			lastEcho = ""
-		case <-time.After(o.options.inactivityTimeout):
-			// If there's a lastEcho already, then we didn't get a server reply, disconnect
-			if lastEcho != "" {
+		case <-timer.C:
+			// We timed out, send an echo request
+			ctx, cancel := context.WithTimeout(context.Background(), o.options.inactivityTimeout)
+			err := o.Echo(ctx)
+			if err != nil {
+				o.logger.V(3).Error(err, "server echo reply error")
 				o.Disconnect()
-				return
 			}
-			// Otherwise send an echo
-			thisEcho := fmt.Sprintf("%d", time.Now().UnixMicro())
-			args := []interface{}{"libovsdb echo", thisEcho}
-			var reply []interface{}
-			// Can't use o.Echo() because it blocks; we need the Call object direct from o.rpcClient.Go()
-			call := o.sendEcho(args, &reply)
-			if call == nil {
-				o.Disconnect()
-				return
-			}
-			lastEcho = thisEcho
-			go func() {
-				// Wait for the echo reply
-				select {
-				case <-stopCh:
-					return
-				case <-call.Done:
-					if call.Error != nil {
-						// RPC timeout; disconnect
-						o.logger.V(3).Error(call.Error, "server echo reply error")
-						o.Disconnect()
-					} else if !reflect.DeepEqual(args, reply) {
-						o.logger.V(3).Info("warning: incorrect server echo reply",
-							"expected", args, "reply", reply)
-						o.Disconnect()
-					} else {
-						// Otherwise stuff thisEcho into the echoReplied channel
-						echoReplied <- thisEcho
-					}
-				}
-			}()
+			cancel()
 		}
+		timer.Reset(o.options.inactivityTimeout)
 	}
 }
 
@@ -1270,14 +1251,15 @@ func (o *ovsdbClient) handleDisconnectNotification() {
 	<-o.rpcClient.DisconnectNotify()
 	// close the stopCh, which will stop the cache event processor
 	close(o.stopCh)
-	if o.trafficSeen != nil {
-		close(o.trafficSeen)
-	}
 	o.metrics.numDisconnects.Inc()
 	// wait for client related handlers to shutdown
 	o.handlerShutdown.Wait()
 	o.rpcMutex.Lock()
-	if o.options.reconnect && !o.shutdown {
+	// trafficSeen may still have senders from transactions that hold rpcMutex
+	// for reading. stopCh also stops the inactivity handler, so trafficSeen
+	// must remain open until those transactions have completed.
+	o.trafficSeen = nil
+	if o.options.reconnect && !o.isShutdown() {
 		o.rpcClient = nil
 		o.rpcMutex.Unlock()
 		suppressionCounter := 1
@@ -1440,10 +1422,7 @@ func hasMonitors(db *database) bool {
 
 // Get implements the API interface's Get function
 func (o *ovsdbClient) Get(ctx context.Context, model model.Model) error {
-	primaryDB := o.primaryDB()
-	waitForCacheConsistent(ctx, primaryDB, o.logger, o.primaryDBName)
-	defer primaryDB.cacheMutex.RUnlock()
-	return primaryDB.api.Get(ctx, model)
+	return o.primaryDB().api.Get(ctx, model)
 }
 
 // Create implements the API interface's Create function
@@ -1452,11 +1431,8 @@ func (o *ovsdbClient) Create(models ...model.Model) ([]ovsdb.Operation, error) {
 }
 
 // List implements the API interface's List function
-func (o *ovsdbClient) List(ctx context.Context, result interface{}) error {
-	primaryDB := o.primaryDB()
-	waitForCacheConsistent(ctx, primaryDB, o.logger, o.primaryDBName)
-	defer primaryDB.cacheMutex.RUnlock()
-	return primaryDB.api.List(ctx, result)
+func (o *ovsdbClient) List(ctx context.Context, result any) error {
+	return o.primaryDB().api.List(ctx, result)
 }
 
 // Where implements the API interface's Where function
@@ -1475,6 +1451,141 @@ func (o *ovsdbClient) WhereAll(m model.Model, conditions ...model.Condition) Con
 }
 
 // WhereCache implements the API interface's WhereCache function
-func (o *ovsdbClient) WhereCache(predicate interface{}) ConditionalAPI {
+func (o *ovsdbClient) WhereCache(predicate any) ConditionalAPI {
 	return o.primaryDB().api.WhereCache(predicate)
+}
+
+// WhereCacheByUUIDs implements the API interface's WhereCacheByUUIDs function
+func (o *ovsdbClient) WhereCacheByUUIDs(predicate any, uuids ...string) ConditionalAPI {
+	return o.primaryDB().api.WhereCacheByUUIDs(predicate, uuids...)
+}
+
+// Select implements the API interface's Select function
+func (o *ovsdbClient) Select(m model.Model, fields ...any) ([]ovsdb.Operation, error) {
+	return o.primaryDB().api.Select(m, fields...)
+}
+
+// GetSelectResultsByIndex parses the results of a transaction containing select operations
+// and populates the target slice with the specified select query's results.
+// The index parameter specifies which select query to retrieve (0-based).
+// Use index=0 for single select queries (WhereAny, WhereCache, etc.).
+func (o *ovsdbClient) GetSelectResultsByIndex(ops []ovsdb.Operation, results []ovsdb.OperationResult, target interface{}, index int) error {
+	if len(ops) != len(results) {
+		return fmt.Errorf("number of operations (%d) and results (%d) must match", len(ops), len(results))
+	}
+
+	// Validate target parameter
+	slicePtr := reflect.ValueOf(target)
+	if slicePtr.Type().Kind() != reflect.Pointer || slicePtr.IsNil() {
+		return &ErrWrongType{slicePtr.Type(), "target must be a non-nil pointer to a slice of models"}
+	}
+
+	sliceVal := reflect.Indirect(slicePtr)
+	if sliceVal.Type().Kind() != reflect.Slice {
+		return &ErrWrongType{slicePtr.Type(), "target must be a pointer to a slice of models"}
+	}
+
+	// GetSelectResultsByIndex only accepts a pointer to a slice of pointers to models
+	modelType := sliceVal.Type().Elem()
+	if modelType.Kind() != reflect.Pointer {
+		return &ErrWrongType{slicePtr.Type(), "target must be a pointer to a slice of model pointers"}
+	}
+	modelType = modelType.Elem()
+
+	o.primaryDB().modelMutex.RLock()
+	dbModel := o.primaryDB().model
+	o.primaryDB().modelMutex.RUnlock()
+
+	// Determine the target table name from the model type
+	dummyModel := reflect.New(modelType).Interface().(model.Model)
+	info, err := dbModel.NewModelInfo(dummyModel)
+	if err != nil {
+		return fmt.Errorf("failed to get model info for target type: %w", err)
+	}
+	targetTable := info.Metadata.TableName
+
+	// Create a map to store merged rows (deduplicated by UUID)
+	mergedRows := make(map[string]ovsdb.Row)
+	mergeRows := func(result ovsdb.OperationResult) error {
+		if result.Error != "" {
+			return fmt.Errorf("operation error: %s: %s", result.Error, result.Details)
+		}
+
+		for _, row := range result.Rows {
+			uuidVal, ok := row["_uuid"]
+			if !ok {
+				return fmt.Errorf("failed to get UUID from row: %v", row)
+			}
+			uuid, ok := uuidVal.(ovsdb.UUID)
+			if !ok {
+				return fmt.Errorf("failed to cast UUID from row: %v", row)
+			}
+			// Deduplicate by UUID - later results overwrite earlier ones
+			// Note different results may have different selected columns
+			mergedRows[uuid.GoUUID] = row
+		}
+		return nil
+	}
+
+	// Single pass to find and collect results for the target index
+	currentIndex := -1
+	var currentCorrelationID string
+	for i, op := range ops {
+		if op.Op != ovsdb.OperationSelect || op.Table != targetTable {
+			continue
+		}
+
+		correlationID := ovsdb.GetCorrelationID(op)
+		if correlationID != currentCorrelationID {
+			currentIndex++
+			currentCorrelationID = correlationID
+		}
+
+		if currentIndex < index {
+			continue
+		}
+		if currentIndex > index {
+			break
+		}
+
+		err := mergeRows(results[i])
+		if err != nil {
+			return err
+		}
+	}
+
+	if currentIndex < index {
+		return fmt.Errorf("index %d is out of range: found %d query groups for table '%s'",
+			index, currentIndex+1, targetTable)
+	}
+
+	// Populate the target slice with optimized memory allocation
+	resultCount := len(mergedRows)
+
+	// Pre-allocate slice with exact capacity to avoid repeated allocations
+	if sliceVal.IsNil() || sliceVal.Cap() < resultCount {
+		sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), resultCount, resultCount))
+	} else {
+		// Reuse existing slice but set to exact length
+		sliceVal.SetLen(resultCount)
+	}
+
+	// Use index-based assignment to avoid append overhead
+	var i int
+	for uuid, row := range mergedRows {
+		model, err := model.CreateModel(dbModel, targetTable, &row, uuid)
+		if err != nil {
+			return fmt.Errorf("failed to create model: %w", err)
+		}
+		sliceVal.Index(i).Set(reflect.ValueOf(model))
+		i++
+	}
+
+	return nil
+}
+
+// GetSelectResults parses select operation results from a transaction.
+// Equivalent to GetSelectResultsByIndex with index 0 (first select query)
+func (o *ovsdbClient) GetSelectResults(ops []ovsdb.Operation, results []ovsdb.OperationResult, target interface{}) error {
+	return o.GetSelectResultsByIndex(ops, results, target, 0)
 }

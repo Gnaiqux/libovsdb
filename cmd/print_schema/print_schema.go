@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"runtime"
 	"runtime/pprof"
 
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 func usage() {
@@ -53,7 +53,7 @@ func main() {
 	}
 	defer schemaFile.Close()
 
-	schemaBytes, err := ioutil.ReadAll(schemaFile)
+	schemaBytes, err := io.ReadAll(schemaFile)
 	if err != nil {
 		log.Fatal(err)
 	}

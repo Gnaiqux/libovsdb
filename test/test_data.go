@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ovn-org/libovsdb/model"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // Note that this schema is not strictly a subset of the real OVS schema. It has
@@ -195,7 +195,7 @@ type BridgeType struct {
 	DatapathType string            `ovsdb:"datapath_type"`
 	DatapathID   *string           `ovsdb:"datapath_id"`
 	OtherConfig  map[string]string `ovsdb:"other_config"`
-	ExternalIds  map[string]string `ovsdb:"external_ids"`
+	ExternalIDs  map[string]string `ovsdb:"external_ids"`
 	Ports        []string          `ovsdb:"ports"`
 	Status       map[string]string `ovsdb:"status"`
 	Mirrors      []string          `ovsdb:"mirrors"`

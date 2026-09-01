@@ -6,19 +6,16 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"fmt"
-	"log"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/go-logr/logr"
-	"github.com/go-logr/stdr"
-	"github.com/ovn-org/libovsdb/mapper"
-	"github.com/ovn-org/libovsdb/model"
-	"github.com/ovn-org/libovsdb/ovsdb"
-	"github.com/ovn-org/libovsdb/updates"
+	"github.com/ovn-kubernetes/libovsdb/mapper"
+	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/updates"
 )
 
 const (
@@ -54,7 +51,7 @@ func NewErrCacheInconsistent(details string) *ErrCacheInconsistent {
 // ErrIndexExists is returned when an item in the database cannot be inserted due to existing indexes
 type ErrIndexExists struct {
 	Table    string
-	Value    interface{}
+	Value    any
 	Index    string
 	New      string
 	Existing []string
@@ -64,14 +61,14 @@ func (e *ErrIndexExists) Error() string {
 	return fmt.Sprintf("cannot insert %s in the %s table. item %s has identical indexes. index: %s, value: %v", e.New, e.Table, e.Existing, e.Index, e.Value)
 }
 
-func NewIndexExistsError(table string, value interface{}, index string, new string, existing []string) *ErrIndexExists {
+func NewIndexExistsError(table string, value any, index string, n string, existing []string) *ErrIndexExists {
 	return &ErrIndexExists{
-		table, value, index, new, existing,
+		table, value, index, n, existing,
 	}
 }
 
 // map of unique values to uuids
-type valueToUUIDs map[interface{}]uuidset
+type valueToUUIDs map[any]uuidset
 
 // map of column name(s) to unique values, to UUIDs
 type columnToValue map[index]valueToUUIDs
@@ -492,6 +489,25 @@ func (r *RowCache) RowsShallow() map[string]model.Model {
 	return result
 }
 
+// RowsByUUIDsShallow returns matching rows without cloning the models.
+// Returned models are READ ONLY.
+func (r *RowCache) RowsByUUIDsShallow(uuids []string) map[string]model.Model {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	capacity := len(uuids)
+	if capacity > len(r.cache) {
+		capacity = len(r.cache)
+	}
+	result := make(map[string]model.Model, capacity)
+	for _, uuid := range uuids {
+		if row, ok := r.cache[uuid]; ok {
+			result[uuid] = row
+		}
+	}
+	return result
+}
+
 // uuidsByConditionsAsIndexes checks possible indexes that can be built with a
 // subset of the provided conditions and returns the uuids for the models that
 // match that subset of conditions. If no conditions could be used as indexes,
@@ -503,17 +519,17 @@ func (r *RowCache) RowsShallow() map[string]model.Model {
 // conditions against all rows of a table.
 //
 //nolint:gocyclo // warns overall function is complex but ignores inner functions
-func (r *RowCache) uuidsByConditionsAsIndexes(conditions []ovsdb.Condition, nativeValues []interface{}) (uuidset, error) {
+func (r *RowCache) uuidsByConditionsAsIndexes(conditions []ovsdb.Condition, nativeValues []any) (uuidset, error) {
 	type indexableCondition struct {
 		column      string
-		keys        []interface{}
-		nativeValue interface{}
+		keys        []any
+		nativeValue any
 	}
 
 	// build an indexable condition, more appropriate for our processing, from
 	// an ovsdb condition. Only equality based conditions can be used as indexes
 	// (or `includes` conditions on map values).
-	toIndexableCondition := func(condition ovsdb.Condition, nativeValue interface{}) *indexableCondition {
+	toIndexableCondition := func(condition ovsdb.Condition, nativeValue any) *indexableCondition {
 		if condition.Column == "_uuid" {
 			return nil
 		}
@@ -528,7 +544,7 @@ func (r *RowCache) uuidsByConditionsAsIndexes(conditions []ovsdb.Condition, nati
 		if condition.Function == ovsdb.ConditionIncludes && isSet {
 			return nil
 		}
-		keys := []interface{}{}
+		keys := []any{}
 		if v.Kind() == reflect.Map && condition.Function == ovsdb.ConditionIncludes {
 			for _, key := range v.MapKeys() {
 				keys = append(keys, key.Interface())
@@ -678,7 +694,7 @@ func (r *RowCache) RowsByCondition(conditions []ovsdb.Condition) (map[string]mod
 	}
 
 	// one pass to obtain the native values
-	nativeValues := make([]interface{}, 0, len(conditions))
+	nativeValues := make([]any, 0, len(conditions))
 	for _, condition := range conditions {
 		tSchema := schema.Column(condition.Column)
 		nativeValue, err := ovsdb.OvsToNative(tSchema, condition.Value)
@@ -774,7 +790,7 @@ func (r *RowCache) Len() int {
 	return len(r.cache)
 }
 
-func (r *RowCache) Index(columns ...string) (map[interface{}][]string, error) {
+func (r *RowCache) Index(columns ...string) (map[any][]string, error) {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	spec := newIndexFromColumns(columns...)
@@ -782,7 +798,7 @@ func (r *RowCache) Index(columns ...string) (map[interface{}][]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("%v is not an index", columns)
 	}
-	dbIndex := make(map[interface{}][]string, len(index))
+	dbIndex := make(map[any][]string, len(index))
 	for k, v := range index {
 		dbIndex[k] = v.list()
 	}
@@ -792,7 +808,7 @@ func (r *RowCache) Index(columns ...string) (map[interface{}][]string, error) {
 // EventHandler can handle events when the contents of the cache changes
 type EventHandler interface {
 	OnAdd(table string, model model.Model)
-	OnUpdate(table string, old model.Model, new model.Model)
+	OnUpdate(table string, old model.Model, newModel model.Model)
 	OnDelete(table string, model model.Model)
 }
 
@@ -800,7 +816,7 @@ type EventHandler interface {
 // It allows a caller to only implement the functions they need
 type EventHandlerFuncs struct {
 	AddFunc    func(table string, model model.Model)
-	UpdateFunc func(table string, old model.Model, new model.Model)
+	UpdateFunc func(table string, old model.Model, newModel model.Model)
 	DeleteFunc func(table string, model model.Model)
 }
 
@@ -812,9 +828,9 @@ func (e *EventHandlerFuncs) OnAdd(table string, model model.Model) {
 }
 
 // OnUpdate calls UpdateFunc if it is not nil
-func (e *EventHandlerFuncs) OnUpdate(table string, old, new model.Model) {
+func (e *EventHandlerFuncs) OnUpdate(table string, old, newModel model.Model) {
 	if e.UpdateFunc != nil {
-		e.UpdateFunc(table, old, new)
+		e.UpdateFunc(table, old, newModel)
 	}
 }
 
@@ -847,7 +863,7 @@ func NewTableCache(dbModel model.DatabaseModel, data Data, logger *logr.Logger) 
 		return nil, fmt.Errorf("tablecache without valid databasemodel cannot be populated")
 	}
 	if logger == nil {
-		l := stdr.NewWithOptions(log.New(os.Stderr, "", log.LstdFlags), stdr.Options{LogCaller: stdr.All}).WithName("cache")
+		l := logr.Discard()
 		logger = &l
 	} else {
 		l := logger.WithName("cache")
@@ -913,7 +929,7 @@ func (t *TableCache) Tables() []string {
 // Update implements the update method of the NotificationHandler interface
 // this populates a channel with updates so they can be processed after the initial
 // state has been Populated
-func (t *TableCache) Update(context interface{}, tableUpdates ovsdb.TableUpdates) error {
+func (t *TableCache) Update(_ any, tableUpdates ovsdb.TableUpdates) error {
 	if len(tableUpdates) == 0 {
 		return nil
 	}
@@ -927,7 +943,7 @@ func (t *TableCache) Update(context interface{}, tableUpdates ovsdb.TableUpdates
 // Update2 implements the update method of the NotificationHandler interface
 // this populates a channel with updates so they can be processed after the initial
 // state has been Populated
-func (t *TableCache) Update2(context interface{}, tableUpdates ovsdb.TableUpdates2) error {
+func (t *TableCache) Update2(_ any, tableUpdates ovsdb.TableUpdates2) error {
 	if len(tableUpdates) == 0 {
 		return nil
 	}
@@ -939,15 +955,15 @@ func (t *TableCache) Update2(context interface{}, tableUpdates ovsdb.TableUpdate
 }
 
 // Locked implements the locked method of the NotificationHandler interface
-func (t *TableCache) Locked([]interface{}) {
+func (t *TableCache) Locked([]any) {
 }
 
 // Stolen implements the stolen method of the NotificationHandler interface
-func (t *TableCache) Stolen([]interface{}) {
+func (t *TableCache) Stolen([]any) {
 }
 
 // Echo implements the echo method of the NotificationHandler interface
-func (t *TableCache) Echo([]interface{}) {
+func (t *TableCache) Echo([]any) {
 }
 
 // Disconnected implements the disconnected method of the NotificationHandler interface
@@ -1130,14 +1146,14 @@ func (e *eventProcessor) AddEventHandler(handler EventHandler) {
 }
 
 // AddEvent writes an event to the channel
-func (e *eventProcessor) AddEvent(eventType string, table string, old model.Model, new model.Model) {
+func (e *eventProcessor) AddEvent(eventType string, table string, old model.Model, newModel model.Model) {
 	// We don't need to check for error here since there
 	// is only a single writer. RPC is run in blocking mode
 	event := event{
 		eventType: eventType,
 		table:     table,
 		old:       old,
-		new:       new,
+		new:       newModel,
 	}
 	select {
 	case e.events <- &event:
@@ -1176,30 +1192,30 @@ func (e *eventProcessor) Run(stopCh <-chan struct{}) {
 
 type cacheUpdate interface {
 	GetUpdatedTables() []string
-	ForEachModelUpdate(table string, do func(uuid string, old, new model.Model) error) error
+	ForEachModelUpdate(table string, do func(uuid string, old, newModel model.Model) error) error
 }
 
 func (t *TableCache) ApplyCacheUpdate(update cacheUpdate) error {
 	tables := update.GetUpdatedTables()
 	for _, table := range tables {
 		tCache := t.cache[table]
-		err := update.ForEachModelUpdate(table, func(uuid string, old, new model.Model) error {
+		err := update.ForEachModelUpdate(table, func(uuid string, old, newModel model.Model) error {
 			switch {
-			case old == nil && new != nil:
-				t.logger.V(5).Info("inserting model", "table", table, "uuid", uuid, "model", new)
-				err := tCache.Create(uuid, new, false)
+			case old == nil && newModel != nil:
+				t.logger.V(5).Info("inserting model", "table", table, "uuid", uuid, "model", newModel)
+				err := tCache.Create(uuid, newModel, false)
 				if err != nil {
 					return err
 				}
-				t.eventProcessor.AddEvent(addEvent, table, nil, new)
-			case old != nil && new != nil:
-				t.logger.V(5).Info("updating model", "table", table, "uuid", uuid, "old", old, "new", new)
-				_, err := tCache.Update(uuid, new, false)
+				t.eventProcessor.AddEvent(addEvent, table, nil, newModel)
+			case old != nil && newModel != nil:
+				t.logger.V(5).Info("updating model", "table", table, "uuid", uuid, "old", old, "new", newModel)
+				_, err := tCache.Update(uuid, newModel, false)
 				if err != nil {
 					return err
 				}
-				t.eventProcessor.AddEvent(updateEvent, table, old, new)
-			case new == nil:
+				t.eventProcessor.AddEvent(updateEvent, table, old, newModel)
+			case newModel == nil:
 				t.logger.V(5).Info("deleting model", "table", table, "uuid", uuid, "model", old)
 				err := tCache.Delete(uuid)
 				if err != nil {
@@ -1216,7 +1232,7 @@ func (t *TableCache) ApplyCacheUpdate(update cacheUpdate) error {
 	return nil
 }
 
-func valueFromIndex(info *mapper.Info, columnKeys []model.ColumnKey) (interface{}, error) {
+func valueFromIndex(info *mapper.Info, columnKeys []model.ColumnKey) (any, error) {
 	if len(columnKeys) > 1 {
 		var buf bytes.Buffer
 		enc := gob.NewEncoder(&buf)
@@ -1250,7 +1266,7 @@ func valueFromIndex(info *mapper.Info, columnKeys []model.ColumnKey) (interface{
 	return val, err
 }
 
-func valueFromColumnKey(info *mapper.Info, columnKey model.ColumnKey) (interface{}, error) {
+func valueFromColumnKey(info *mapper.Info, columnKey model.ColumnKey) (any, error) {
 	val, err := info.FieldByColumn(columnKey.Column)
 	if err != nil {
 		return nil, err
@@ -1263,13 +1279,13 @@ func valueFromColumnKey(info *mapper.Info, columnKey model.ColumnKey) (interface
 	}
 	// if the value is a non-nil pointer of an optional, dereference
 	v := reflect.ValueOf(val)
-	if v.Kind() == reflect.Ptr && !v.IsNil() {
+	if v.Kind() == reflect.Pointer && !v.IsNil() {
 		val = v.Elem().Interface()
 	}
 	return val, err
 }
 
-func valueFromMap(aMap interface{}, key interface{}) (interface{}, error) {
+func valueFromMap(aMap any, key any) (any, error) {
 	m := reflect.ValueOf(aMap)
 	if m.Kind() != reflect.Map {
 		return nil, fmt.Errorf("expected map but got %s", m.Kind())

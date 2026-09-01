@@ -7,8 +7,8 @@ import (
 
 	"github.com/cenkalti/rpc2"
 	"github.com/google/uuid"
-	"github.com/ovn-org/libovsdb/database"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/database"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // connectionMonitors maps a connection to a map or monitors
@@ -80,8 +80,8 @@ func (m *monitor) Send(update database.Update) {
 	if len(tu) == 0 {
 		return
 	}
-	args := []interface{}{json.RawMessage([]byte(m.id)), tu}
-	var reply interface{}
+	args := []any{json.RawMessage([]byte(m.id)), tu}
+	var reply any
 	err := m.client.Call("update2", args, &reply)
 	if err != nil {
 		log.Printf("client error handling update rpc: %v", err)
@@ -97,8 +97,8 @@ func (m *monitor) Send2(update database.Update) {
 	if len(tu) == 0 {
 		return
 	}
-	args := []interface{}{json.RawMessage([]byte(m.id)), tu}
-	var reply interface{}
+	args := []any{json.RawMessage([]byte(m.id)), tu}
+	var reply any
 	err := m.client.Call("update2", args, &reply)
 	if err != nil {
 		log.Printf("client error handling update2 rpc: %v", err)
@@ -114,8 +114,8 @@ func (m *monitor) Send3(id uuid.UUID, update database.Update) {
 	if len(tu) == 0 {
 		return
 	}
-	args := []interface{}{json.RawMessage([]byte(m.id)), id.String(), tu}
-	var reply interface{}
+	args := []any{json.RawMessage([]byte(m.id)), id.String(), tu}
+	var reply any
 	err := m.client.Call("update2", args, &reply)
 	if err != nil {
 		log.Printf("client error handling update3 rpc: %v", err)
@@ -126,13 +126,13 @@ func filterColumns(row *ovsdb.Row, columns map[string]bool) *ovsdb.Row {
 	if row == nil {
 		return nil
 	}
-	new := make(ovsdb.Row, len(*row))
+	newRow := make(ovsdb.Row, len(*row))
 	for k, v := range *row {
 		if _, ok := columns[k]; ok {
-			new[k] = v
+			newRow[k] = v
 		}
 	}
-	return &new
+	return &newRow
 }
 
 func (m *monitor) filter(update database.Update) ovsdb.TableUpdates {

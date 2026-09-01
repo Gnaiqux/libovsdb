@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSchema(t *testing.T) {
@@ -20,7 +21,12 @@ func TestSchema(t *testing.T) {
 	zero := 0
 	one := 1
 	two := 2
+	oneReal := 1.1
+	twoReal := 2.2
+	boolTrue := true
 	boolFalse := false
+	uuid1 := "550e8400-e29b-41d4-a716-446655440000"
+	uuid2 := "550e8400-e29b-41d4-a716-446655440001"
 	schemaTestSuite := []schemaTest{
 		{
 			name: "Simple AtomicType columns",
@@ -112,11 +118,65 @@ func TestSchema(t *testing.T) {
 			    "min": 0
 			  }
 			},
-		        "enumSet": {
+		        "enumSetString1": {
+			  "type": {
+			    "key": {
+			      "type": "string",
+			      "enum": "one"
+			     },
+			    "max": "unlimited",
+			    "min": 0
+			  }
+			},
+		        "enumSetString2": {
 			  "type": {
 			    "key": {
 			      "type": "string",
 			      "enum": ["set", ["one", "two"]]
+			     },
+			    "max": "unlimited",
+			    "min": 0
+			  }
+			},
+		        "enumSetInteger": {
+			  "type": {
+			    "key": {
+			      "type": "integer",
+			      "enum": ["set", [1, 2]],
+				  "minInteger": 1,
+     	          "maxInteger": 2
+			     },
+			    "max": "unlimited",
+			    "min": 0
+			  }
+			},
+		        "enumSetReal": {
+			  "type": {
+			    "key": {
+			      "type": "real",
+			      "enum": ["set", [1.1, 2.2]],
+			      "minReal": 1.1,
+   			      "maxReal": 2.2
+			     },
+			    "max": "unlimited",
+			    "min": 0
+			  }
+			},
+		        "enumSetBoolean": {
+			  "type": {
+			    "key": {
+			      "type": "boolean",
+			      "enum": ["set", [true, false]]
+			     },
+			    "max": "unlimited",
+			    "min": 0
+			  }
+			},
+		        "enumSetUUID": {
+			  "type": {
+			    "key": {
+			      "type": "uuid",
+			      "enum": ["set", [["uuid", "550e8400-e29b-41d4-a716-446655440000"], ["uuid","550e8400-e29b-41d4-a716-446655440001"]]]
 			     },
 			    "max": "unlimited",
 			    "min": 0
@@ -144,7 +204,7 @@ func TestSchema(t *testing.T) {
 							"oneElem": {
 								Type: TypeSet,
 								TypeObj: &ColumnType{
-									Key: &BaseType{Type: "uuid"},
+									Key: &BaseType{Type: TypeUUID},
 									max: &one,
 									min: &zero,
 								},
@@ -152,7 +212,7 @@ func TestSchema(t *testing.T) {
 							"multipleElem": {
 								Type: TypeSet,
 								TypeObj: &ColumnType{
-									Key: &BaseType{Type: "real"},
+									Key: &BaseType{Type: TypeReal},
 									max: &two,
 									min: &zero,
 								},
@@ -160,17 +220,80 @@ func TestSchema(t *testing.T) {
 							"unlimitedElem": {
 								Type: TypeSet,
 								TypeObj: &ColumnType{
-									Key: &BaseType{Type: "integer"},
+									Key: &BaseType{Type: TypeInteger},
 									max: &Unlimited,
 									min: &zero,
 								},
 							},
-							"enumSet": {
+							"enumSetString1": {
 								Type: TypeSet,
 								TypeObj: &ColumnType{
 									Key: &BaseType{
-										Type: "string",
-										Enum: []interface{}{"one", "two"},
+										Type: TypeString,
+										// e.g. "enum": ["set", ["empty_lb_backends"]]}}},
+										Enum: []any{"one"},
+									},
+									max: &Unlimited,
+									min: &zero,
+								},
+							},
+							"enumSetString2": {
+								Type: TypeSet,
+								TypeObj: &ColumnType{
+									Key: &BaseType{
+										Type: TypeString,
+										Enum: []any{"one", "two"},
+									},
+									max: &Unlimited,
+									min: &zero,
+								},
+							},
+							"enumSetInteger": {
+								Type: TypeSet,
+								TypeObj: &ColumnType{
+									Key: &BaseType{
+										Type:       TypeInteger,
+										Enum:       []any{one, two},
+										minInteger: &one,
+										maxInteger: &two,
+									},
+									max: &Unlimited,
+									min: &zero,
+								},
+							},
+							"enumSetReal": {
+								Type: TypeSet,
+								TypeObj: &ColumnType{
+									Key: &BaseType{
+										Type:    TypeReal,
+										Enum:    []any{oneReal, twoReal},
+										minReal: &oneReal,
+										maxReal: &twoReal,
+									},
+									max: &Unlimited,
+									min: &zero,
+								},
+							},
+							"enumSetBoolean": {
+								Type: TypeSet,
+								TypeObj: &ColumnType{
+									Key: &BaseType{
+										Type: TypeBoolean,
+										Enum: []any{boolTrue, boolFalse},
+									},
+									max: &Unlimited,
+									min: &zero,
+								},
+							},
+							"enumSetUUID": {
+								Type: TypeSet,
+								TypeObj: &ColumnType{
+									Key: &BaseType{
+										Type: TypeUUID,
+										Enum: []any{
+											[]any{"uuid", uuid1},
+											[]any{"uuid", uuid2},
+										},
 									},
 									max: &Unlimited,
 									min: &zero,
@@ -269,7 +392,7 @@ func TestSchema(t *testing.T) {
 									},
 									Value: &BaseType{
 										Type: "string",
-										Enum: []interface{}{"one", "two"},
+										Enum: []any{"one", "two"},
 									},
 								},
 							},
@@ -348,7 +471,7 @@ func TestSchema(t *testing.T) {
 				}
 			}
 			b, err := json.Marshal(schema)
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			assert.JSONEq(t, string(test.schema), string(b))
 		})
 	}
@@ -376,7 +499,7 @@ func TestTable(t *testing.T) {
 
 	var schema DatabaseSchema
 	err := json.Unmarshal(schemaJ, &schema)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	t.Run("GetTable_exists", func(t *testing.T) {
 		table := schema.Table("test")
@@ -409,7 +532,7 @@ func TestTable(t *testing.T) {
 func TestBaseTypeMarshalUnmarshalJSON(t *testing.T) {
 	datapath := "Datapath"
 	zero := 0
-	max := 4294967295
+	valMax := 4294967295
 	strong := "strong"
 	tests := []struct {
 		name         string
@@ -463,14 +586,14 @@ func TestBaseTypeMarshalUnmarshalJSON(t *testing.T) {
 		{
 			"enum",
 			[]byte(`{"type": "string","enum": ["set", ["OpenFlow10","OpenFlow11","OpenFlow12","OpenFlow13","OpenFlow14","OpenFlow15"]]}`),
-			BaseType{Type: TypeString, Enum: []interface{}{"OpenFlow10", "OpenFlow11", "OpenFlow12", "OpenFlow13", "OpenFlow14", "OpenFlow15"}},
+			BaseType{Type: TypeString, Enum: []any{"OpenFlow10", "OpenFlow11", "OpenFlow12", "OpenFlow13", "OpenFlow14", "OpenFlow15"}},
 			[]byte(`{"type": "string","enum": ["set", ["OpenFlow10","OpenFlow11","OpenFlow12","OpenFlow13","OpenFlow14","OpenFlow15"]]}`),
 			false,
 		},
 		{
 			"int with min and max",
 			[]byte(`{"type":"integer","minInteger":0,"maxInteger": 4294967295}`),
-			BaseType{Type: TypeInteger, minInteger: &zero, maxInteger: &max},
+			BaseType{Type: TypeInteger, minInteger: &zero, maxInteger: &valMax},
 			[]byte(`{"type":"integer","minInteger":0,"maxInteger": 4294967295}`),
 			false,
 		},
@@ -479,10 +602,10 @@ func TestBaseTypeMarshalUnmarshalJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var b BaseType
 			err := b.UnmarshalJSON(tt.in)
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, b)
 			raw, err := b.MarshalJSON()
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			assert.JSONEq(t, string(tt.expectedJSON), string(raw))
 		})
 	}
@@ -557,7 +680,7 @@ func TestColumnTypeMarshalUnmarshalJSON(t *testing.T) {
 				},
 				Value: &BaseType{
 					Type: "string",
-					Enum: []interface{}{"one", "two"},
+					Enum: []any{"one", "two"},
 				},
 				min: &one,
 				max: &one,
@@ -569,10 +692,10 @@ func TestColumnTypeMarshalUnmarshalJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var c ColumnType
 			err := c.UnmarshalJSON(tt.in)
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, c)
 			raw, err := c.MarshalJSON()
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			assert.JSONEq(t, string(tt.expectedJSON), string(raw))
 		})
 	}
@@ -652,7 +775,7 @@ func TestColumnSchemaMarshalUnmarshalJSON(t *testing.T) {
 			ColumnSchema{
 				Type: TypeEnum,
 				TypeObj: &ColumnType{
-					Key: &BaseType{Type: TypeString, Enum: []interface{}{"one", "two"}},
+					Key: &BaseType{Type: TypeString, Enum: []any{"one", "two"}},
 					max: &one,
 					min: &one,
 				},
@@ -664,11 +787,11 @@ func TestColumnSchemaMarshalUnmarshalJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var c ColumnSchema
 			err := c.UnmarshalJSON(tt.in)
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, c)
 			assert.True(t, c.Mutable())
 			raw, err := c.MarshalJSON()
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			assert.JSONEq(t, string(tt.expectedJSON), string(raw))
 		})
 	}
@@ -677,8 +800,8 @@ func TestColumnSchemaMarshalUnmarshalJSON(t *testing.T) {
 func TestBaseTypeSimpleAtomic(t *testing.T) {
 	b := BaseType{Type: TypeString}
 	assert.True(t, b.simpleAtomic())
-	max := 1024
-	b1 := BaseType{Type: TypeInteger, maxInteger: &max}
+	valMax := 1024
+	b1 := BaseType{Type: TypeInteger, maxInteger: &valMax}
 	assert.False(t, b1.simpleAtomic())
 }
 
@@ -713,11 +836,11 @@ func TestBaseTypeMinReal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.MinReal()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
-			assert.Equal(t, tt.want, got)
+			assert.InDelta(t, tt.want, got, 0.0001)
 		})
 	}
 }
@@ -753,11 +876,11 @@ func TestBaseTypeMaxReal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.MaxReal()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
-			assert.Equal(t, tt.want, got)
+			assert.InDelta(t, tt.want, got, 0.0001)
 		})
 	}
 }
@@ -793,9 +916,9 @@ func TestBaseTypeMinInteger(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.MinInteger()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.want, got)
 		})
@@ -819,7 +942,7 @@ func TestBaseTypeMaxInteger(t *testing.T) {
 		{
 			"nil",
 			&BaseType{Type: TypeInteger},
-			int(math.Pow(2, 63)) - 1,
+			math.MaxInt64,
 			false,
 		},
 		{
@@ -833,9 +956,9 @@ func TestBaseTypeMaxInteger(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.MaxInteger()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.want, got)
 		})
@@ -873,9 +996,9 @@ func TestBaseTypeMinLength(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.MinLength()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.want, got)
 		})
@@ -899,7 +1022,7 @@ func TestBaseTypeMaxLength(t *testing.T) {
 		{
 			"nil",
 			&BaseType{Type: TypeString},
-			int(math.Pow(2, 63)) - 1,
+			math.MaxInt64,
 			false,
 		},
 		{
@@ -913,9 +1036,9 @@ func TestBaseTypeMaxLength(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.MaxLength()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.want, got)
 		})
@@ -953,9 +1076,9 @@ func TestBaseTypeRefTable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.RefTable()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.want, got)
 		})
@@ -993,9 +1116,9 @@ func TestBaseTypeRefType(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.bt.RefType()
 			if tt.wantErr {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				require.NoError(t, err)
 			}
 			assert.Equal(t, tt.want, got)
 		})
@@ -1082,7 +1205,7 @@ func TestColumnSchema_String(t *testing.T) {
 			fields{
 				Type: TypeEnum,
 				TypeObj: &ColumnType{
-					Key: &BaseType{Type: TypeString, Enum: []interface{}{"permit", "deny"}},
+					Key: &BaseType{Type: TypeString, Enum: []any{"permit", "deny"}},
 					max: &unlimited,
 					min: &zero,
 				},

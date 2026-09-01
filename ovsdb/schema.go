@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"strings"
@@ -75,7 +74,7 @@ func (schema DatabaseSchema) Print(w io.Writer) {
 
 // SchemaFromFile returns a DatabaseSchema from a file
 func SchemaFromFile(f *os.File) (DatabaseSchema, error) {
-	data, err := ioutil.ReadAll(f)
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return DatabaseSchema{}, err
 	}
@@ -197,7 +196,7 @@ const (
 // BaseType is a base-type structure as per RFC7047
 type BaseType struct {
 	Type       string
-	Enum       []interface{}
+	Enum       []any
 	minReal    *float64
 	maxReal    *float64
 	minInteger *int
@@ -247,11 +246,11 @@ func (b *BaseType) MinInteger() (int, error) {
 	if b.minInteger != nil {
 		return *b.minInteger, nil
 	}
-	return int(math.Pow(-2, 63)), nil
+	return math.MinInt64, nil
 }
 
-// MaxInteger returns the minimum integer value
-// RFC7047 specifies the minimum to be 2^63-1
+// MaxInteger returns the maximum integer value
+// RFC7047 specifies the maximum to be 2^63-1
 func (b *BaseType) MaxInteger() (int, error) {
 	if b.Type != TypeInteger {
 		return 0, fmt.Errorf("%s is not an integer", b.Type)
@@ -259,7 +258,7 @@ func (b *BaseType) MaxInteger() (int, error) {
 	if b.maxInteger != nil {
 		return *b.maxInteger, nil
 	}
-	return int(math.Pow(2, 63)) - 1, nil
+	return math.MaxInt64, nil
 }
 
 // MinLength returns the minimum string length
@@ -277,15 +276,15 @@ func (b *BaseType) MinLength() (int, error) {
 
 // MaxLength returns the maximum string length
 // RFC7047 doesn't specify a default, but we assume
-// that it must 2^63-1
+// that it must be 2^63-1
 func (b *BaseType) MaxLength() (int, error) {
 	if b.Type != TypeString {
-		return 0, fmt.Errorf("%s is not an string", b.Type)
+		return 0, fmt.Errorf("%s is not a string", b.Type)
 	}
 	if b.maxLength != nil {
 		return *b.maxLength, nil
 	}
-	return int(math.Pow(2, 63)) - 1, nil
+	return math.MaxInt64, nil
 }
 
 // RefTable returns the table to which a UUID type refers
@@ -325,16 +324,16 @@ func (b *BaseType) UnmarshalJSON(data []byte) error {
 	}
 	// temporary type to avoid recursive call to unmarshal
 	var bt struct {
-		Type       string      `json:"type"`
-		Enum       interface{} `json:"enum,omitempty"`
-		MinReal    *float64    `json:"minReal,omitempty"`
-		MaxReal    *float64    `json:"maxReal,omitempty"`
-		MinInteger *int        `json:"minInteger,omitempty"`
-		MaxInteger *int        `json:"maxInteger,omitempty"`
-		MinLength  *int        `json:"minLength,omitempty"`
-		MaxLength  *int        `json:"maxLength,omitempty"`
-		RefTable   *string     `json:"refTable,omitempty"`
-		RefType    *RefType    `json:"refType,omitempty"`
+		Type       string   `json:"type"`
+		Enum       any      `json:"enum,omitempty"`
+		MinReal    *float64 `json:"minReal,omitempty"`
+		MaxReal    *float64 `json:"maxReal,omitempty"`
+		MinInteger *int     `json:"minInteger,omitempty"`
+		MaxInteger *int     `json:"maxInteger,omitempty"`
+		MinLength  *int     `json:"minLength,omitempty"`
+		MaxLength  *int     `json:"maxLength,omitempty"`
+		RefTable   *string  `json:"refTable,omitempty"`
+		RefType    *RefType `json:"refType,omitempty"`
 	}
 	err := json.Unmarshal(data, &bt)
 	if err != nil {
@@ -344,14 +343,35 @@ func (b *BaseType) UnmarshalJSON(data []byte) error {
 	if bt.Enum != nil {
 		// 'enum' is a list or a single element representing a list of exactly one element
 		switch bt.Enum.(type) {
-		case []interface{}:
+		case []any:
 			// it's an OvsSet
-			oSet := bt.Enum.([]interface{})
-			innerSet := oSet[1].([]interface{})
-			b.Enum = make([]interface{}, len(innerSet))
-			copy(b.Enum, innerSet)
+			oSet := bt.Enum.([]any)
+			innerSet := oSet[1].([]any)
+			b.Enum = make([]any, len(innerSet))
+
+			// json unmarshal will convert all numeric types to float64, Convert float64 to int if the base type is integer
+			if bt.Type == "integer" {
+				for i, v := range innerSet {
+					if f, ok := v.(float64); ok {
+						b.Enum[i] = int(f)
+					} else {
+						b.Enum[i] = v
+					}
+				}
+			} else {
+				copy(b.Enum, innerSet)
+			}
 		default:
-			b.Enum = []interface{}{bt.Enum}
+			// Single element enum
+			if bt.Type == "integer" {
+				if f, ok := bt.Enum.(float64); ok {
+					b.Enum = []any{int(f)}
+				} else {
+					b.Enum = []any{bt.Enum}
+				}
+			} else {
+				b.Enum = []any{bt.Enum}
+			}
 		}
 	}
 	b.Type = bt.Type
@@ -440,10 +460,10 @@ func (c *ColumnType) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var colType struct {
-		Key   *BaseType   `json:"key"`
-		Value *BaseType   `json:"value"`
-		Min   *int        `json:"min"`
-		Max   interface{} `json:"max"`
+		Key   *BaseType `json:"key"`
+		Value *BaseType `json:"value"`
+		Min   *int      `json:"min"`
+		Max   any       `json:"max"`
 	}
 	err := json.Unmarshal(data, &colType)
 	if err != nil {
